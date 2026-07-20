@@ -78,4 +78,4 @@ jobs:
         run: |
           docker compose -f compose.hardened.yml down -v --remove-orphans
           echo "Remaining containers:"
-          docker ps -a --filter "label=com.docker.compose.project" --format "{{.Names}}" || true
+          docker ps -a --filter "label=com.docker.compose.project" || true
