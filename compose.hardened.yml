@@ -67,6 +67,9 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -94,7 +97,7 @@ services:
 
   # Gateway service exposes the API port to the host
   gateway:
-    image: nginx:1.27-alpine
+    image: nginxinc/nginx-unprivileged:1.27-alpine
     ports:
       - "127.0.0.1:3000:3000"
     networks:
@@ -106,8 +109,6 @@ services:
         condition: service_healthy
     cap_drop:
       - ALL
-    cap_add:
-      - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
     read_only: true
