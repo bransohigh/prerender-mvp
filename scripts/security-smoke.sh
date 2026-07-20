@@ -210,8 +210,12 @@ import('playwright').then(async ({ chromium }) => {
   } catch {}
   console.log('CMDLINE_COUNT:' + cmdlines.length);
   console.log('CMDLINE_ONE:' + (cmdlines[0] || '').slice(0, 200));
-  console.log('CMDLINE_HAS_NO_SANDBOX:' + cmdlines.some((c) => c.includes('--no-sandbox')));
-  console.log('CMDLINE_HAS_DISABLE_SETUID:' + cmdlines.some((c) => c.includes('--disable-setuid-sandbox')));
+  const noSandboxMatch = cmdlines.find((c) => c.includes('--no-sandbox'));
+  const setuidMatch = cmdlines.find((c) => c.includes('--disable-setuid-sandbox'));
+  console.log('CMDLINE_HAS_NO_SANDBOX:' + !!noSandboxMatch);
+  console.log('CMDLINE_HAS_DISABLE_SETUID:' + !!setuidMatch);
+  if (noSandboxMatch) console.log('MATCH_NO_SANDBOX:' + noSandboxMatch.slice(0, 400));
+  if (setuidMatch) console.log('MATCH_SETUID:' + setuidMatch.slice(0, 400));
 
   const page = await browser.newPage();
   await page.goto('https://example.com', { waitUntil: 'networkidle', timeout: 15000 });
@@ -246,20 +250,20 @@ if echo "$SANDBOX_CHECK" | grep -q "CMDLINE_HAS_NO_SANDBOX:false" && \
   pass "No forbidden sandbox-bypass flags on live Chromium command line"
 else
   fail "Forbidden sandbox-bypass flag found on live Chromium command line"
-  echo "  DEBUG: $(echo "$SANDBOX_CHECK" | grep -E 'CMDLINE_HAS|CMDLINE_ONE:')"
+  echo "  DEBUG: $(echo "$SANDBOX_CHECK" | grep -E 'CMDLINE_HAS|CMDLINE_ONE:|MATCH_NO_SANDBOX|MATCH_SETUID')"
 fi
 
 echo "  INFO: $(echo "$SANDBOX_CHECK" | grep -o 'CMDLINE_COUNT:.*')"
 
 # No lingering Chromium processes after the sandbox check closes its browser.
 sleep 3
-LEFTOVER=$(renderer_exec sh -c "grep -l chrome-headless-shell /proc/[0-9]*/cmdline 2>/dev/null | wc -l" 2>/dev/null || echo "0")
+LEFTOVER=$(renderer_exec sh -c "grep -l 'ms-playwright.*chrome-headless-shell' /proc/[0-9]*/cmdline 2>/dev/null | wc -l" 2>/dev/null || echo "0")
 LEFTOVER="${LEFTOVER//[[:space:]]/}"
 if [[ "$LEFTOVER" =~ ^[0-9]+$ ]] && [[ "$LEFTOVER" -eq 0 ]]; then
   pass "No leftover Chromium processes after sandboxed launch"
 else
   fail "Leftover Chromium processes detected: $LEFTOVER"
-  renderer_exec sh -c "for f in /proc/[0-9]*/cmdline; do grep -q chrome-headless-shell \"\$f\" 2>/dev/null && { echo \"  DEBUG: \$f:\"; tr '\\0' ' ' < \"\$f\"; echo; }; done" || true
+  renderer_exec sh -c "for f in /proc/[0-9]*/cmdline; do grep -q 'ms-playwright.*chrome-headless-shell' \"\$f\" 2>/dev/null && { echo \"  DEBUG: \$f:\"; tr '\\0' ' ' < \"\$f\"; echo; }; done" || true
 fi
 
 # Restart/recovery: the renderer must be able to launch a fresh sandboxed
