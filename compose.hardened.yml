@@ -2,10 +2,20 @@
 #
 # Network architecture:
 #   renderer-api → internal network → egress-proxy → external network → internet
-#   renderer-api has NO external network access (internal: true).
+#   renderer-api's egress goes through the proxy (OUTBOUND_PROXY_URL);
+#   direct internet access is blocked by application-level SSRF controls.
 #   Port 3000 is published to 127.0.0.1 only.
 #
+# AppArmor: the renderer-api service requires the custom "chromium-hardened"
+# profile (docker/security/chromium-apparmor.profile) to be loaded into the
+# kernel before `up`. On Ubuntu 23.10+/24.04+ hosts, AppArmor blocks
+# unprivileged user-namespace creation by default (needed by Chromium's
+# sandbox); this profile is Docker's own default profile plus one additive
+# `userns,` rule. Load it with:
+#   sudo apparmor_parser -Kr docker/security/chromium-apparmor.profile
+#
 # Usage:
+#   sudo apparmor_parser -Kr docker/security/chromium-apparmor.profile
 #   docker compose -f compose.hardened.yml up --build -d
 #   docker compose -f compose.hardened.yml down -v --remove-orphans
 
@@ -35,6 +45,7 @@ services:
     security_opt:
       - no-new-privileges:true
       - seccomp=docker/security/chromium-seccomp.json
+      - apparmor=chromium-hardened
     pids_limit: 200
     cpus: 2
     mem_limit: 2g

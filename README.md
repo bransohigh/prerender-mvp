@@ -72,8 +72,11 @@ Hardened mod renderer'ı izole bir ağ arkasında egress proxy üzerinden çalı
 
 ```bash
 export API_KEY="guclu-bir-api-anahtari-en-az-8-karakter"
+sudo apparmor_parser -Kr docker/security/chromium-apparmor.profile
 docker compose -f compose.hardened.yml up --build -d
 ```
+
+> Ubuntu 23.10+/24.04+ host'larda Chromium'un sandbox'ı için `chromium-hardened` AppArmor profilinin önceden yüklenmesi gerekir — bkz. [SECURITY.md](SECURITY.md).
 
 Mimari:
 
@@ -88,7 +91,7 @@ Mimari:
 └───────────────────────────────────────────┘
 ```
 
-- Renderer: non-root, read-only filesystem, sandbox Chromium, cap_drop ALL, seccomp profili, yalnızca `127.0.0.1:3000` üzerinden erişilebilir
+- Renderer: non-root, read-only filesystem, sandbox Chromium, cap_drop ALL, seccomp + AppArmor profili, yalnızca `127.0.0.1:3000` üzerinden erişilebilir
 - Egress proxy: Squid 6, yalnızca 80/443 portları, private IP ACL'leri, cache yok
 - Renderer'ın doğrudan internet erişimi yok — yalnızca proxy üzerinden
 

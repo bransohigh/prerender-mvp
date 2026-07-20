@@ -54,7 +54,8 @@ Proxy DNS çözümleme sonrası ulaşılan **gerçek destination IP** adresini k
 
 - **Non-root**: Renderer `pwuser` (UID 1000) olarak çalışır
 - **Chromium sandbox**: Linux'ta `chromiumSandbox: true` ile user namespace sandbox aktif
-- **Seccomp profili**: Chromium sandbox için gereken `clone`/`unshare` syscall'larına izin veren özel profil. Docker varsayılanı bu syscall'ları engelliyor — profil yalnızca bunları ekler. `seccomp=unconfined` veya `SYS_ADMIN` kullanılmaz.
+- **Seccomp profili**: Docker'ın resmi varsayılan profili (moby/profiles) temel alınarak, Chromium'un unprivileged user-namespace sandbox'ı için gereken `clone3`/`unshare`/`setns`/`chroot` syscall'larına ek olarak izin verir. `seccomp=unconfined` veya `SYS_ADMIN`/`SYS_CHROOT` capability'si kullanılmaz — kernel, yeni namespace içindeki yetkileri syscall anında ayrıca doğrular.
+- **AppArmor profili**: Ubuntu 23.10+/24.04+ üzerinde `kernel.apparmor_restrict_unprivileged_userns=1` sysctl'i, container'ların `userns,` kuralına sahip olmayan AppArmor profilleriyle unprivileged user namespace oluşturmasını engeller (Docker'ın `docker-default` profili bu kuralı içermez). `docker/security/chromium-apparmor.profile`, Docker'ın kendi `docker-default` şablonuna (moby/profiles) tek ek kural olarak `userns,` ekler; host'ta `apparmor_parser -Kr` ile yüklenip `security_opt: apparmor=chromium-hardened` ile referans alınır. `apparmor=unconfined` kullanılmaz.
 - **Read-only filesystem**: Root filesystem read-only, yalnızca `/tmp` ve `/home/pwuser` tmpfs
 - **cap_drop ALL**: Tüm Linux capabilities kaldırılır
 - **no-new-privileges**: Privilege escalation engellenir

@@ -87,6 +87,13 @@ else
     fail "No seccomp profile found"
   fi
 
+  APPARMOR_OPT=$(echo "$INSPECT" | jq -r '.[0].AppArmorProfile // "none"' 2>/dev/null)
+  if [[ "$APPARMOR_OPT" == "chromium-hardened" ]]; then
+    pass "AppArmor profile is chromium-hardened (docker-default + userns,)"
+  else
+    fail "AppArmor profile is not chromium-hardened: $APPARMOR_OPT"
+  fi
+
   if echo "$INSPECT" | jq -e '.[0].HostConfig.CapDrop // [] | index("ALL")' > /dev/null 2>&1; then
     pass "cap_drop ALL is set"
   else
