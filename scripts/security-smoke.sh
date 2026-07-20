@@ -256,17 +256,18 @@ fi
 echo "  INFO: $(echo "$SANDBOX_CHECK" | grep -o 'CMDLINE_COUNT:.*')"
 
 # No lingering Chromium processes after the sandbox check closes its browser.
-# Each grep here checks only ONE substring, so neither grep's own argv/cmdline
-# (visible to itself in /proc) ever contains both substrings at once --
-# a single combined pattern would match its own invocation (quining).
+# The `sh -c` wrapper's own /proc/$$/cmdline contains this entire script's
+# source text (including both grep substrings), so it must be excluded by
+# path -- not just by splitting into separate single-substring greps, since
+# the outer sh process's single argv still contains both substrings together.
 sleep 3
-LEFTOVER=$(renderer_exec sh -c 'count=0; for f in /proc/[0-9]*/cmdline; do grep -q ms-playwright "$f" 2>/dev/null && grep -q chrome-headless-shell "$f" 2>/dev/null && count=$((count+1)); done; echo $count' 2>/dev/null || echo "0")
+LEFTOVER=$(renderer_exec sh -c 'self=/proc/$$/cmdline; count=0; for f in /proc/[0-9]*/cmdline; do [ "$f" = "$self" ] && continue; grep -q ms-playwright "$f" 2>/dev/null && grep -q chrome-headless-shell "$f" 2>/dev/null && count=$((count+1)); done; echo $count' 2>/dev/null || echo "0")
 LEFTOVER="${LEFTOVER//[[:space:]]/}"
 if [[ "$LEFTOVER" =~ ^[0-9]+$ ]] && [[ "$LEFTOVER" -eq 0 ]]; then
   pass "No leftover Chromium processes after sandboxed launch"
 else
   fail "Leftover Chromium processes detected: $LEFTOVER"
-  renderer_exec sh -c 'for f in /proc/[0-9]*/cmdline; do grep -q ms-playwright "$f" 2>/dev/null && grep -q chrome-headless-shell "$f" 2>/dev/null && { echo "  DEBUG: $f:"; tr "\0" " " < "$f"; echo; }; done' || true
+  renderer_exec sh -c 'self=/proc/$$/cmdline; for f in /proc/[0-9]*/cmdline; do [ "$f" = "$self" ] && continue; grep -q ms-playwright "$f" 2>/dev/null && grep -q chrome-headless-shell "$f" 2>/dev/null && { echo "  DEBUG: $f:"; tr "\0" " " < "$f"; echo; }; done' || true
 fi
 
 # Restart/recovery: the renderer must be able to launch a fresh sandboxed
