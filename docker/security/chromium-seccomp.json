@@ -860,8 +860,9 @@
       }
     },
     {
-      "comment": "Chromium namespace sandbox: create new user/pid/net namespaces without CAP_SYS_ADMIN. Kernel still enforces capability checks per-namespace at syscall time (unprivileged user namespaces), so this does not grant host-level privilege escalation.",
+      "comment": "Chromium namespace sandbox: create new user/pid/net namespaces without CAP_SYS_ADMIN. `clone` here overrides the earlier masked-flag rule (inherited from Docker's default profile) that blocks the CLONE_NEWUSER/CLONE_NEWPID/etc. bits when CAP_SYS_ADMIN is absent -- Chromium's zygote calls clone() directly with those flags, not unshare()/clone3(). The kernel still enforces capability checks per-namespace at syscall time (unprivileged user namespaces), so this does not grant host-level privilege escalation.",
       "names": [
+        "clone",
         "clone3",
         "unshare",
         "setns"
