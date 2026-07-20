@@ -1,0 +1,12 @@
+# Development compose — no proxy, no sandbox enforcement
+services:
+  renderer-api:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    shm_size: 1gb
+    mem_limit: 2g
+    cpus: 2

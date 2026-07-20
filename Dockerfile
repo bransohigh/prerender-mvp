@@ -1,0 +1,43 @@
+# Build stage
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+
+COPY tsconfig.json ./
+COPY src ./src
+RUN npx tsc -p tsconfig.json
+
+# Remove dev dependencies
+RUN npm prune --production
+
+# Production stage — Playwright base with Chromium pre-installed
+FROM mcr.microsoft.com/playwright:v1.61.1-noble AS production
+WORKDIR /app
+
+# Verify Playwright version matches
+RUN node -e "const v = require('/ms-playwright-agent/package.json').version; if (v !== '1.61.1') { console.error('Playwright version mismatch: image=' + v); process.exit(1); }"
+
+# Copy production artifacts
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
+
+# Create writable directories for Chromium temp profiles
+RUN mkdir -p /tmp/chromium-profile /tmp/playwright && \
+    chown -R pwuser:pwuser /tmp/chromium-profile /tmp/playwright /app
+
+ENV NODE_ENV=production
+ENV TMPDIR=/tmp
+ENV HOME=/home/pwuser
+
+# Switch to non-root user (pwuser is UID 1000 in Playwright image)
+USER pwuser
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
+  CMD node -e "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+
+CMD ["node", "dist/src/server.js"]

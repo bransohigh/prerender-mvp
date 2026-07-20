@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  docker-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker compose version
+        run: docker compose version
+
+      - name: Validate compose configs
+        run: |
+          docker compose config > /dev/null
+          docker compose -f compose.hardened.yml config > /dev/null
+
+      - name: Build hardened images
+        run: docker compose -f compose.hardened.yml build
+
+      - name: Generate API key and start stack
+        run: |
+          export API_KEY="ci-$(openssl rand -hex 16)"
+          echo "API_KEY=$API_KEY" >> "$GITHUB_ENV"
+          docker compose -f compose.hardened.yml up -d
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf --connect-timeout 2 --max-time 5 http://127.0.0.1:3000/health > /dev/null 2>&1; then
+              echo "Healthy after $((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Health check failed after 60s"
+          docker compose -f compose.hardened.yml logs
+          exit 1
+
+      - name: Show running containers
+        run: docker compose -f compose.hardened.yml ps
+
+      - name: Make smoke test executable
+        run: chmod +x scripts/security-smoke.sh
+
+      - name: Run security smoke tests
+        run: bash scripts/security-smoke.sh
+
+      - name: Show container logs
+        if: always()
+        run: docker compose -f compose.hardened.yml logs --tail=200
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose -f compose.hardened.yml down -v --remove-orphans
+          echo "Remaining containers:"
+          docker ps -a --filter "label=com.docker.compose.project" --format "{{.Names}}" || true

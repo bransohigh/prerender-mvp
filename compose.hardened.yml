@@ -1,0 +1,126 @@
+# Hardened compose — renderer behind egress proxy, non-root, sandbox, read-only
+#
+# Network architecture:
+#   renderer-api → internal network → egress-proxy → external network → internet
+#   renderer-api has NO external network access.
+#
+# Usage:
+#   docker compose -f compose.hardened.yml up --build -d
+#   docker compose -f compose.hardened.yml down -v --remove-orphans
+
+services:
+  renderer-api:
+    build: .
+    environment:
+      - API_KEY=${API_KEY:-hardened-test-key-32chars-min}
+      - HOST=0.0.0.0
+      - PORT=3000
+      - LOG_LEVEL=info
+      - RENDER_TIMEOUT_MS=15000
+      - MAX_HTML_BYTES=5000000
+      - MAX_CONCURRENT_RENDERS=2
+      - MAX_QUEUED_RENDERS=20
+      - RENDER_QUEUE_TIMEOUT_MS=10000
+      - OUTBOUND_PROXY_URL=http://egress-proxy:3128
+      - REQUIRE_OUTBOUND_PROXY=true
+    networks:
+      - internal
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=docker/security/chromium-seccomp.json
+    pids_limit: 200
+    cpus: 2
+    mem_limit: 2g
+    shm_size: 1gb
+    tmpfs:
+      - /tmp:size=512m,noexec,nosuid
+      - /home/pwuser:size=64m,noexec,nosuid
+    stop_grace_period: 15s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    depends_on:
+      egress-proxy:
+        condition: service_started
+
+  egress-proxy:
+    image: ubuntu/squid:6.6-24.04_edge
+    volumes:
+      - ./docker/proxy/squid.conf:/etc/squid/squid.conf:ro
+    networks:
+      internal:
+      external:
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /var/spool/squid:size=64m
+      - /var/log/squid:size=32m
+      - /var/run:size=8m
+      - /tmp:size=64m
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 50
+    stop_grace_period: 10s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    healthcheck:
+      test: ["CMD-SHELL", "squidclient -h 127.0.0.1 -p 3128 mgr:info 2>/dev/null | grep -q 'Squid Object Cache' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # Gateway service exposes the API port to the host
+  gateway:
+    image: nginx:1.27-alpine
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - internal
+    volumes:
+      - ./docker/gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      renderer-api:
+        condition: service_healthy
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=16m
+      - /var/run:size=8m
+      - /tmp:size=16m
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 20
+    restart: unless-stopped
+
+networks:
+  internal:
+    internal: true
+  external:
