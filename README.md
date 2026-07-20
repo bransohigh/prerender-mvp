@@ -78,18 +78,18 @@ docker compose -f compose.hardened.yml up --build -d
 Mimari:
 
 ```
-                    ┌─────────────────────────────────────────┐
-                    │         internal network (isolated)       │
-Internet ←→ Gateway │  ┌───────────┐      ┌──────────────┐    │
-       :3000        │  │ renderer  │ ───→ │ egress-proxy │ ───┼──→ Internet
-  (localhost only)  │  │ (non-root)│      │   (Squid)    │    │   (external net)
-                    │  └───────────┘      └──────────────┘    │
-                    └─────────────────────────────────────────┘
+┌───────────────────────────────────────────┐
+│         internal network (isolated)         │
+│  ┌───────────┐      ┌──────────────┐       │
+│  │ renderer  │ ───→ │ egress-proxy │ ───┼──→ Internet
+│  │ (non-root)│      │   (Squid)    │       │   (external net)
+│  └───────────┘      └──────────────┘       │
+│   127.0.0.1:3000                            │
+└───────────────────────────────────────────┘
 ```
 
-- Renderer: non-root, read-only filesystem, sandbox Chromium, cap_drop ALL, seccomp profili
-- Egress proxy: Squid 6.6, yalnızca 80/443 portları, private IP ACL'leri, cache yok
-- Gateway: nginx, yalnızca `127.0.0.1:3000` üzerinden erişilebilir
+- Renderer: non-root, read-only filesystem, sandbox Chromium, cap_drop ALL, seccomp profili, yalnızca `127.0.0.1:3000` üzerinden erişilebilir
+- Egress proxy: Squid 6, yalnızca 80/443 portları, private IP ACL'leri, cache yok
 - Renderer'ın doğrudan internet erişimi yok — yalnızca proxy üzerinden
 
 ### Container limitleri
@@ -98,7 +98,6 @@ Internet ←→ Gateway │  ┌───────────┐      ┌─
 |--------|-----|-----|-----|-------|
 | renderer-api | 2 GB | 2 | 200 | 512 MB (/tmp) + 64 MB (/home) |
 | egress-proxy | 256 MB | 0.5 | 50 | 64 MB |
-| gateway | 64 MB | 0.25 | 20 | 16 MB |
 
 ### Security smoke testleri
 
