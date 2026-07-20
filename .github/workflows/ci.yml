@@ -11,6 +11,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      API_KEY: ci-test-api-key-minimum-8-chars
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
