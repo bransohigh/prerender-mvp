@@ -184,6 +184,8 @@ echo "  INFO: Container UID/GID: $(renderer_exec sh -c 'id' 2>/dev/null || echo 
 echo "  INFO: unprivileged_userns_clone: $(renderer_exec cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 'n/a (not exposed in container)')"
 echo "  INFO: max_user_namespaces: $(renderer_exec cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 'n/a (not exposed in container)')"
 echo "  INFO: Seccomp profile path: docker/security/chromium-seccomp.json"
+echo "  INFO: Live AppArmor label: $(renderer_exec cat /proc/self/attr/current 2>/dev/null || echo unknown)"
+echo "  INFO: Raw unshare --user test: $(renderer_exec sh -c 'unshare --user --map-root-user id 2>&1' || echo failed)"
 
 SANDBOX_CHECK=$(renderer_exec node -e "
 import('playwright').then(async ({ chromium }) => {
