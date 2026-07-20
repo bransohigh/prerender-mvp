@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { describe, expect, it, afterAll, beforeAll } from 'vitest';
 import { createRenderer, type Renderer } from '../../src/services/renderer.js';
+import { createDefaultLauncher } from '../../src/lib/browser-launch.js';
 import type { UrlValidator } from '../../src/types/render.js';
 
 let testServer: http.Server;
@@ -179,6 +180,7 @@ beforeAll(async () => {
     urlValidator: createTestValidator(testOrigin),
     renderTimeoutMs: 5000,
     maxHtmlBytes: 1500,
+    launchBrowser: createDefaultLauncher(),
   });
 });
 

@@ -2,6 +2,7 @@ import http from 'node:http';
 import { describe, expect, it, afterAll, beforeAll } from 'vitest';
 import { buildApp } from '../../src/app.js';
 import { createRenderer, type Renderer } from '../../src/services/renderer.js';
+import { createDefaultLauncher } from '../../src/lib/browser-launch.js';
 import type { UrlValidator } from '../../src/types/render.js';
 
 const VALID_API_KEY = process.env['API_KEY'] ?? 'test-api-key-12345';
@@ -79,6 +80,7 @@ beforeAll(async () => {
     urlValidator: createTestValidator(testOrigin),
     renderTimeoutMs: 10000,
     maxHtmlBytes: 500000,
+    launchBrowser: createDefaultLauncher(),
   });
 });
 
@@ -121,6 +123,7 @@ describe('E2E: Fastify → capacity → Chromium', () => {
       urlValidator: createTestValidator(testOrigin),
       renderTimeoutMs: 10000,
       maxHtmlBytes: 500000,
+      launchBrowser: createDefaultLauncher(),
     });
 
     app = await buildApp({
