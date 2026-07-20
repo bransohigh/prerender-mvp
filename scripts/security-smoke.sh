@@ -210,7 +210,7 @@ import('playwright').then(async ({ chromium }) => {
   await browser.close();
   console.log('CLOSE_OK');
 }).catch((e) => { console.log('LAUNCH_FAIL:' + e.message); process.exit(1); });
-" 2>&1)
+" 2>&1) || true
 
 if echo "$SANDBOX_CHECK" | grep -q "LAUNCH_OK"; then
   pass "Chromium launched with chromiumSandbox=true"
@@ -260,7 +260,7 @@ import('playwright').then(async ({ chromium }) => {
   console.log('RECOVERY_OK:' + (await page.title()));
   await browser.close();
 }).catch((e) => console.log('RECOVERY_FAIL:' + e.message));
-" 2>&1)
+" 2>&1) || true
 if echo "$RECOVERY_CHECK" | grep -q "RECOVERY_OK"; then
   pass "Sandboxed browser can relaunch after previous instance closed"
 else
@@ -281,7 +281,7 @@ import('playwright').then(async ({ chromium }) => {
   console.log(text.replace(/\n/g, ' ').slice(0, 500));
   await browser.close();
 }).catch((e) => console.log('UNREADABLE:' + e.message));
-" 2>&1)
+" 2>&1) || true
 if [[ -z "$SANDBOX_PAGE" || "$SANDBOX_PAGE" == UNREADABLE* ]]; then
   echo "  INFO: chrome://sandbox not readable in headless mode (expected) — relying on launch/cmdline/seccomp/UID evidence above instead."
 else
