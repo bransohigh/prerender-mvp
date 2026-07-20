@@ -113,8 +113,6 @@ services:
       - no-new-privileges:true
     read_only: true
     tmpfs:
-      - /var/cache/nginx:size=16m
-      - /var/run:size=8m
       - /tmp:size=16m
     mem_limit: 64m
     cpus: 0.25
