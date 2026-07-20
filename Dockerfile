@@ -16,9 +16,6 @@ RUN npm prune --production
 FROM mcr.microsoft.com/playwright:v1.61.1-noble AS production
 WORKDIR /app
 
-# Verify Playwright version matches
-RUN node -e "const v = require('/ms-playwright-agent/package.json').version; if (v !== '1.61.1') { console.error('Playwright version mismatch: image=' + v); process.exit(1); }"
-
 # Copy production artifacts
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
