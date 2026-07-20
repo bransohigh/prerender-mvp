@@ -36,6 +36,14 @@ jobs:
       - name: Docker compose version
         run: docker compose version
 
+      - name: Host diagnostics (no secrets)
+        run: |
+          echo "Kernel: $(uname -a)"
+          echo "Docker: $(docker version --format '{{.Server.Version}}')"
+          echo "unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo n/a)"
+          echo "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo n/a)"
+          echo "apparmor_restrict_unprivileged_userns: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo n/a)"
+
       - name: Validate compose configs
         run: |
           docker compose config > /dev/null

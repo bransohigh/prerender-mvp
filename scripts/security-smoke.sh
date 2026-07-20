@@ -168,6 +168,126 @@ section "Direct Internet Egress"
 # application-level SSRF controls. This test checks if Chromium traffic
 # goes through the proxy (verified by the proxy access tests below).
 
+# ---- Chromium Sandbox ----
+section "Chromium Sandbox"
+
+echo "  INFO: Kernel: $(renderer_exec uname -a 2>/dev/null || echo unknown)"
+echo "  INFO: Docker version: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+echo "  INFO: Container UID/GID: $(renderer_exec sh -c 'id' 2>/dev/null || echo unknown)"
+echo "  INFO: unprivileged_userns_clone: $(renderer_exec cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 'n/a (not exposed in container)')"
+echo "  INFO: max_user_namespaces: $(renderer_exec cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 'n/a (not exposed in container)')"
+echo "  INFO: Seccomp profile path: docker/security/chromium-seccomp.json"
+
+SANDBOX_CHECK=$(renderer_exec node -e "
+import('playwright').then(async ({ chromium }) => {
+  const fs = await import('node:fs/promises');
+  const browser = await chromium.launch({
+    headless: true,
+    chromiumSandbox: true,
+    args: ['--disable-dev-shm-usage', '--disable-extensions', '--disable-background-networking', '--no-first-run'],
+  });
+  console.log('LAUNCH_OK');
+
+  let cmdlines = [];
+  try {
+    const pids = await fs.readdir('/proc');
+    for (const pid of pids) {
+      if (!/^[0-9]+$/.test(pid)) continue;
+      try {
+        const raw = await fs.readFile('/proc/' + pid + '/cmdline', 'utf8');
+        if (raw.includes('chrome')) cmdlines.push(raw.replace(/\x00/g, ' ').trim());
+      } catch {}
+    }
+  } catch {}
+  console.log('CMDLINE_COUNT:' + cmdlines.length);
+  console.log('CMDLINE_HAS_NO_SANDBOX:' + cmdlines.some((c) => c.includes('--no-sandbox')));
+  console.log('CMDLINE_HAS_DISABLE_SETUID:' + cmdlines.some((c) => c.includes('--disable-setuid-sandbox')));
+
+  const page = await browser.newPage();
+  await page.goto('https://example.com', { waitUntil: 'networkidle', timeout: 15000 });
+  const title = await page.title();
+  console.log('RENDER_OK:' + title);
+  await browser.close();
+  console.log('CLOSE_OK');
+}).catch((e) => { console.log('LAUNCH_FAIL:' + e.message); process.exit(1); });
+" 2>&1)
+
+if echo "$SANDBOX_CHECK" | grep -q "LAUNCH_OK"; then
+  pass "Chromium launched with chromiumSandbox=true"
+else
+  fail "Chromium sandbox launch failed"
+  echo "  DETAIL: $SANDBOX_CHECK"
+fi
+
+if echo "$SANDBOX_CHECK" | grep -q "RENDER_OK"; then
+  pass "Sandboxed render succeeded ($(echo "$SANDBOX_CHECK" | grep -o 'RENDER_OK:.*'))"
+else
+  fail "Sandboxed render did not complete"
+fi
+
+if echo "$SANDBOX_CHECK" | grep -q "CLOSE_OK"; then
+  pass "Sandboxed browser closed cleanly"
+else
+  fail "Sandboxed browser did not close cleanly"
+fi
+
+if echo "$SANDBOX_CHECK" | grep -q "CMDLINE_HAS_NO_SANDBOX:false" && \
+   echo "$SANDBOX_CHECK" | grep -q "CMDLINE_HAS_DISABLE_SETUID:false"; then
+  pass "No forbidden sandbox-bypass flags on live Chromium command line"
+else
+  fail "Forbidden sandbox-bypass flag found on live Chromium command line"
+fi
+
+echo "  INFO: $(echo "$SANDBOX_CHECK" | grep -o 'CMDLINE_COUNT:.*')"
+
+# No lingering Chromium processes after the sandbox check closes its browser.
+sleep 1
+LEFTOVER=$(renderer_exec sh -c "grep -l chrome /proc/[0-9]*/cmdline 2>/dev/null | wc -l" 2>/dev/null || echo "0")
+LEFTOVER="${LEFTOVER//[[:space:]]/}"
+if [[ "$LEFTOVER" =~ ^[0-9]+$ ]] && [[ "$LEFTOVER" -eq 0 ]]; then
+  pass "No leftover Chromium processes after sandboxed launch"
+else
+  fail "Leftover Chromium processes detected: $LEFTOVER"
+fi
+
+# Restart/recovery: the renderer must be able to launch a fresh sandboxed
+# browser again after the previous one closed (simulates crash recovery).
+RECOVERY_CHECK=$(renderer_exec node -e "
+import('playwright').then(async ({ chromium }) => {
+  const browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+  const page = await browser.newPage();
+  await page.goto('https://example.com', { waitUntil: 'networkidle', timeout: 15000 });
+  console.log('RECOVERY_OK:' + (await page.title()));
+  await browser.close();
+}).catch((e) => console.log('RECOVERY_FAIL:' + e.message));
+" 2>&1)
+if echo "$RECOVERY_CHECK" | grep -q "RECOVERY_OK"; then
+  pass "Sandboxed browser can relaunch after previous instance closed"
+else
+  fail "Sandboxed browser failed to relaunch: $RECOVERY_CHECK"
+fi
+
+# chrome://sandbox is not reliably readable in headless mode; this is
+# informational only and does not gate pass/fail. The authoritative signals
+# are: successful sandboxed launch above, chromiumSandbox=true, absence of
+# --no-sandbox/--disable-setuid-sandbox on the live process, active seccomp
+# profile, and non-root UID (all checked above/elsewhere in this script).
+SANDBOX_PAGE=$(renderer_exec node -e "
+import('playwright').then(async ({ chromium }) => {
+  const browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+  const page = await browser.newPage();
+  await page.goto('chrome://sandbox', { timeout: 5000 }).catch(() => {});
+  const text = await page.content().catch(() => '');
+  console.log(text.replace(/\n/g, ' ').slice(0, 500));
+  await browser.close();
+}).catch((e) => console.log('UNREADABLE:' + e.message));
+" 2>&1)
+if [[ -z "$SANDBOX_PAGE" || "$SANDBOX_PAGE" == UNREADABLE* ]]; then
+  echo "  INFO: chrome://sandbox not readable in headless mode (expected) — relying on launch/cmdline/seccomp/UID evidence above instead."
+else
+  echo "  INFO: chrome://sandbox output (best-effort): ${SANDBOX_PAGE:0:300}"
+fi
+
 # ---- Proxy Public Access ----
 section "Proxy Public Internet Access"
 

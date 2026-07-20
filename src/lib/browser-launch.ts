@@ -3,6 +3,13 @@ import { chromium, type Browser, type LaunchOptions } from 'playwright';
 export interface BrowserLaunchConfig {
   proxyUrl?: string;
   sandbox?: boolean;
+  // Fail fast if running on Linux without the Chromium sandbox enabled.
+  // Only the production renderer sets this — integration tests intentionally
+  // launch without Playwright's sandbox on bare (non-Docker) CI runners where
+  // unprivileged user namespaces may be restricted by the host, since the
+  // hardened container's own isolation (seccomp, cap_drop ALL, etc.) does
+  // not apply there anyway.
+  enforceSandboxOnLinux?: boolean;
 }
 
 export function buildLaunchOptions(config?: BrowserLaunchConfig): LaunchOptions {
@@ -38,10 +45,21 @@ export function assertNoSandboxBypass(options: LaunchOptions): void {
   }
 }
 
+export function assertSandboxRequiredOnLinux(options: LaunchOptions): void {
+  if (process.platform === 'linux' && options.chromiumSandbox !== true) {
+    throw new Error(
+      'Chromium sandbox is required on Linux and must not be disabled.',
+    );
+  }
+}
+
 export function createDefaultLauncher(
   config?: BrowserLaunchConfig,
 ): () => Promise<Browser> {
   const options = buildLaunchOptions(config);
   assertNoSandboxBypass(options);
+  if (config?.enforceSandboxOnLinux) {
+    assertSandboxRequiredOnLinux(options);
+  }
   return () => chromium.launch(options);
 }

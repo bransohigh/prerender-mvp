@@ -26,7 +26,6 @@ services:
       - RENDER_QUEUE_TIMEOUT_MS=10000
       - OUTBOUND_PROXY_URL=http://egress-proxy:3128
       - REQUIRE_OUTBOUND_PROXY=true
-      - CHROMIUM_SANDBOX=false
     networks:
       - internal
     init: true

@@ -22,7 +22,8 @@ export function createRenderer(options?: RendererOptions): Renderer {
     options?.launchBrowser ??
     createDefaultLauncher({
       proxyUrl: env.OUTBOUND_PROXY_URL,
-      sandbox: env.CHROMIUM_SANDBOX,
+      sandbox: process.platform === 'linux',
+      enforceSandboxOnLinux: true,
     });
 
   let browserPromise: Promise<Browser> | null = null;

@@ -27,10 +27,6 @@ const envSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
-  CHROMIUM_SANDBOX: z
-    .enum(['true', 'false'])
-    .default(process.platform === 'linux' ? 'true' : 'false')
-    .transform((v) => v === 'true'),
 });
 
 export const env = envSchema.parse(process.env);
