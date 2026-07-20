@@ -204,7 +204,7 @@ import('playwright').then(async ({ chromium }) => {
       if (!/^[0-9]+$/.test(pid)) continue;
       try {
         const raw = await fs.readFile('/proc/' + pid + '/cmdline', 'utf8');
-        if (raw.includes('chrome')) cmdlines.push(raw.replace(/\x00/g, ' ').trim());
+        if (raw.includes('chrome-headless-shell')) cmdlines.push(raw.replace(/\x00/g, ' ').trim());
       } catch {}
     }
   } catch {}
@@ -253,13 +253,13 @@ echo "  INFO: $(echo "$SANDBOX_CHECK" | grep -o 'CMDLINE_COUNT:.*')"
 
 # No lingering Chromium processes after the sandbox check closes its browser.
 sleep 3
-LEFTOVER=$(renderer_exec sh -c "grep -l chrome /proc/[0-9]*/cmdline 2>/dev/null | wc -l" 2>/dev/null || echo "0")
+LEFTOVER=$(renderer_exec sh -c "grep -l chrome-headless-shell /proc/[0-9]*/cmdline 2>/dev/null | wc -l" 2>/dev/null || echo "0")
 LEFTOVER="${LEFTOVER//[[:space:]]/}"
 if [[ "$LEFTOVER" =~ ^[0-9]+$ ]] && [[ "$LEFTOVER" -eq 0 ]]; then
   pass "No leftover Chromium processes after sandboxed launch"
 else
   fail "Leftover Chromium processes detected: $LEFTOVER"
-  renderer_exec sh -c "for f in /proc/[0-9]*/cmdline; do grep -q chrome \"\$f\" 2>/dev/null && { echo \"  DEBUG: \$f:\"; tr '\\0' ' ' < \"\$f\"; echo; }; done" || true
+  renderer_exec sh -c "for f in /proc/[0-9]*/cmdline; do grep -q chrome-headless-shell \"\$f\" 2>/dev/null && { echo \"  DEBUG: \$f:\"; tr '\\0' ' ' < \"\$f\"; echo; }; done" || true
 fi
 
 # Restart/recovery: the renderer must be able to launch a fresh sandboxed
