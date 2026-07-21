@@ -34,7 +34,13 @@ export type AppErrorCode =
   | 'INVITATION_ALREADY_USED'
   | 'INVITATION_EMAIL_MISMATCH'
   | 'ACCOUNT_ALREADY_EXISTS'
-  | 'RATE_LIMITED';
+  | 'RATE_LIMITED'
+  | 'API_KEY_INVALID'
+  | 'API_KEY_EXPIRED'
+  | 'API_KEY_REVOKED'
+  | 'API_KEY_NOT_FOUND'
+  | 'ORGANIZATION_SUSPENDED'
+  | 'PROJECT_SUSPENDED';
 
 const STATUS_BY_CODE: Record<AppErrorCode, number> = {
   PROJECT_NOT_FOUND: 404,
@@ -69,6 +75,12 @@ const STATUS_BY_CODE: Record<AppErrorCode, number> = {
   INVITATION_EMAIL_MISMATCH: 403,
   ACCOUNT_ALREADY_EXISTS: 409,
   RATE_LIMITED: 429,
+  API_KEY_INVALID: 401,
+  API_KEY_EXPIRED: 401,
+  API_KEY_REVOKED: 401,
+  API_KEY_NOT_FOUND: 404, // management-route "key not found in this project", distinct from render-time API_KEY_INVALID (401)
+  ORGANIZATION_SUSPENDED: 403,
+  PROJECT_SUSPENDED: 403,
 };
 
 export class AppError extends Error {

@@ -25,6 +25,8 @@ import { fetchAndParseSitemapSource } from '../services/sitemap-fetch-service.js
 import { createPostgresDiscoveredUrlRepository } from '../repositories/postgres/postgres-discovered-url-repository.js';
 import { createOriginCheckHook } from '../lib/csrf.js';
 import { createNoopMetrics, type Metrics } from '../lib/metrics.js';
+import { createApiKeyRepository } from '../repositories/postgres/api-key-repository.js';
+import { createApiKeyService } from '../services/api-key-service.js';
 
 const createInvitationSchema = z.object({
   email: z.string().email().max(320),
@@ -49,6 +51,11 @@ const createDomainSchema = z.object({
 
 const updateMemberRoleSchema = z.object({
   role: z.enum(['admin', 'member']),
+});
+
+const createApiKeySchema = z.object({
+  name: z.string().min(1).max(100),
+  expiresInDays: z.coerce.number().int().min(1).max(365).optional(),
 });
 
 const listQuerySchema = z.object({
@@ -82,6 +89,8 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
   const { auth, db, invitationService } = options;
   const metrics = options.metrics ?? createNoopMetrics();
   const tenant = createTenantRepository(db);
+  const apiKeyRepo = createApiKeyRepository(db);
+  const apiKeyService = createApiKeyService(tenant, apiKeyRepo);
   const rateLimiter = createVerificationRateLimiter();
   const inFlightGuard = createInFlightGuard();
 
@@ -469,6 +478,80 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
           metrics,
         });
         return reply.send({ sitemapSourceId: source.id, discoveredCount: outcome.discoveredCount });
+      } catch (err) {
+        return sendAppError(err, reply, request.id);
+      }
+    },
+  );
+
+  // ---- project-scoped render API keys ------------------------------------
+  app.post<{ Params: { organizationId: string; projectId: string } }>(
+    '/organizations/:organizationId/projects/:projectId/api-keys',
+    async (request, reply) => {
+      try {
+        const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'api_key.create', metrics);
+        const parsed = createApiKeySchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: 'invalid_request', details: parsed.error.flatten(), requestId: request.id });
+        }
+        const result = await apiKeyService.createKey({
+          organizationId: ctx.organizationId,
+          projectId: request.params.projectId,
+          name: parsed.data.name,
+          expiresInDays: parsed.data.expiresInDays,
+          createdByUserId: ctx.userId,
+        });
+        return reply.code(201).send(result);
+      } catch (err) {
+        return sendAppError(err, reply, request.id);
+      }
+    },
+  );
+
+  app.get<{ Params: { organizationId: string; projectId: string } }>(
+    '/organizations/:organizationId/projects/:projectId/api-keys',
+    async (request, reply) => {
+      try {
+        const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'api_key.list', metrics);
+        const items = await apiKeyService.listKeys(ctx.organizationId, request.params.projectId);
+        return reply.send({ items });
+      } catch (err) {
+        return sendAppError(err, reply, request.id);
+      }
+    },
+  );
+
+  app.delete<{ Params: { organizationId: string; projectId: string; keyId: string } }>(
+    '/organizations/:organizationId/projects/:projectId/api-keys/:keyId',
+    async (request, reply) => {
+      try {
+        const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'api_key.revoke', metrics);
+        const result = await apiKeyService.revokeKey(ctx.organizationId, request.params.projectId, request.params.keyId);
+        if (result === 'not_found') throw new AppError('API_KEY_NOT_FOUND', 'API key not found');
+        if (result === 'already_revoked') {
+          return reply.code(409).send({ error: 'API_KEY_REVOKED', requestId: request.id });
+        }
+        return reply.code(200).send({ status: 'revoked' });
+      } catch (err) {
+        return sendAppError(err, reply, request.id);
+      }
+    },
+  );
+
+  app.post<{ Params: { organizationId: string; projectId: string; keyId: string } }>(
+    '/organizations/:organizationId/projects/:projectId/api-keys/:keyId/rotate',
+    async (request, reply) => {
+      try {
+        const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'api_key.rotate', metrics);
+        const result = await apiKeyService.rotateKey(ctx.organizationId, request.params.projectId, request.params.keyId, ctx.userId);
+        if (result === 'not_found') throw new AppError('API_KEY_NOT_FOUND', 'API key not found');
+        if (result === 'already_revoked' || result === 'already_rotated') {
+          return reply.code(409).send({ error: 'API_KEY_REVOKED', requestId: request.id });
+        }
+        if (result === 'expired') {
+          return reply.code(409).send({ error: 'API_KEY_EXPIRED', requestId: request.id });
+        }
+        return reply.code(201).send(result);
       } catch (err) {
         return sendAppError(err, reply, request.id);
       }

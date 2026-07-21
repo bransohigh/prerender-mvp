@@ -27,7 +27,12 @@ export type OrganizationPermission =
   | 'domain.rotate_token'
   | 'sitemap.read'
   | 'sitemap.discover'
-  | 'sitemap.fetch';
+  | 'sitemap.fetch'
+  | 'api_key.create'
+  | 'api_key.list'
+  | 'api_key.revoke'
+  | 'api_key.rotate'
+  | 'audit.read';
 
 const OWNER_PERMISSIONS: OrganizationPermission[] = [
   'organization.read',
@@ -52,6 +57,11 @@ const OWNER_PERMISSIONS: OrganizationPermission[] = [
   'sitemap.read',
   'sitemap.discover',
   'sitemap.fetch',
+  'api_key.create',
+  'api_key.list',
+  'api_key.revoke',
+  'api_key.rotate',
+  'audit.read',
 ];
 
 const ADMIN_PERMISSIONS: OrganizationPermission[] = [
@@ -73,6 +83,11 @@ const ADMIN_PERMISSIONS: OrganizationPermission[] = [
   'sitemap.read',
   'sitemap.discover',
   'sitemap.fetch',
+  'api_key.create',
+  'api_key.list',
+  'api_key.revoke',
+  'api_key.rotate',
+  'audit.read',
   // Deliberately excluded: organization.update/delete, member.role.change,
   // member.remove (of an owner), invitation targeting the owner role.
 ];
@@ -83,7 +98,8 @@ const MEMBER_PERMISSIONS: OrganizationPermission[] = [
   'project.read',
   'domain.read',
   'sitemap.read',
-  // Read-only: no create/update/delete/verify/rotate/invite permissions.
+  // Read-only: no create/update/delete/verify/rotate/invite/api-key/audit
+  // permissions.
 ];
 
 const MATRIX: Record<OrganizationRole, ReadonlySet<OrganizationPermission>> = {
