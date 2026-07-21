@@ -424,7 +424,7 @@ fi
 DOMAIN_RESPONSE=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/projects/$PROJECT_ID/domains" \
   -H "content-type: application/json" \
   -H "x-admin-api-key: $ADMIN_API_KEY" \
-  -d '{"hostname":"smoke-test.example.com","verificationMethod":"dns_txt"}' 2>/dev/null || echo '{"error":"timeout"}')
+  -d '{"hostname":"example.com","verificationMethod":"dns_txt"}' 2>/dev/null || echo '{"error":"timeout"}')
 DOMAIN_ID=$(echo "$DOMAIN_RESPONSE" | jq -r '.domain.id // empty')
 if [[ -n "$DOMAIN_ID" ]] && ! echo "$DOMAIN_RESPONSE" | jq -e 'has("token") or (.verification.token // "" | length > 0)' > /dev/null 2>&1; then
   fail "Domain create response is missing verification.token"
@@ -450,22 +450,13 @@ fi
 RENDER=$(curl -sf --connect-timeout 10 --max-time 30 -X POST "$API_URL/v1/render" \
   -H "content-type: application/json" \
   -H "x-render-api-key: $RENDER_API_KEY" \
-  -d "{\"domainId\":\"$DOMAIN_ID\",\"url\":\"https://smoke-test.example.com\"}" 2>/dev/null || echo '{"error":"timeout"}')
+  -d "{\"domainId\":\"$DOMAIN_ID\",\"url\":\"https://example.com\"}" 2>/dev/null || echo '{"error":"timeout"}')
 
-if echo "$RENDER" | jq -e '.html | length > 0' > /dev/null 2>&1; then
+if echo "$RENDER" | jq -e '.html | length > 100' > /dev/null 2>&1; then
   TITLE=$(echo "$RENDER" | jq -r '.title // "unknown"')
   pass "Render successful for verified domain — title: $TITLE"
 else
-  # smoke-test.example.com is not a real reachable host, so a render_error
-  # (422) after passing domain-authorization is the expected/acceptable
-  # outcome here — what matters is that it got PAST authorization and into
-  # the actual render attempt (confirmed by the DOMAIN_NOT_VERIFIED check
-  # below never firing for this specific request).
-  if echo "$RENDER" | jq -e '.error != "DOMAIN_NOT_VERIFIED" and .error != "DOMAIN_NOT_FOUND" and .error != "URL_DOMAIN_MISMATCH"' > /dev/null 2>&1; then
-    pass "Render reached the renderer past domain authorization (unreachable test host, expected render_error)"
-  else
-    fail "Render failed at domain authorization: $(echo "$RENDER" | head -c 200)"
-  fi
+  fail "Render failed for verified domain: $(echo "$RENDER" | head -c 200)"
 fi
 
 UNVERIFIED_DOMAIN_RESPONSE=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/projects/$PROJECT_ID/domains" \
@@ -486,7 +477,7 @@ fi
 OLD_HEADER_RENDER=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/render" \
   -H "content-type: application/json" \
   -H "x-api-key: $RENDER_API_KEY" \
-  -d "{\"domainId\":\"$DOMAIN_ID\",\"url\":\"https://smoke-test.example.com\"}" 2>/dev/null || echo "000")
+  -d "{\"domainId\":\"$DOMAIN_ID\",\"url\":\"https://example.com\"}" 2>/dev/null || echo "000")
 if [[ "$OLD_HEADER_RENDER" == "401" ]]; then
   pass "Legacy x-api-key header no longer authenticates /v1/render"
 else
