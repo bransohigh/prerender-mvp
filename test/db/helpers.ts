@@ -15,6 +15,9 @@ export function createTestDbClient(): DbClient {
 
 export async function truncateAll(client: DbClient): Promise<void> {
   await client.db.execute(
-    sql`TRUNCATE TABLE discovered_urls, sitemap_sources, domains, projects RESTART IDENTITY CASCADE`,
+    sql`TRUNCATE TABLE discovered_urls, sitemap_sources, domains, projects,
+      audit_events, invitations, apikey, invitation, member, organization,
+      session, account, verification, "user"
+      RESTART IDENTITY CASCADE`,
   );
 }

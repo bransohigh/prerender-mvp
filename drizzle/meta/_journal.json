@@ -8,6 +8,13 @@
       "when": 1784628199644,
       "tag": "0000_modern_redwing",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784641961678,
+      "tag": "0001_add_better_auth_tables",
+      "breakpoints": true
     }
   ]
 }

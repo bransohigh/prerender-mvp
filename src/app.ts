@@ -18,6 +18,11 @@ import { createDomainService } from './services/domain-service.js';
 import { metrics as defaultMetrics, type Metrics } from './lib/metrics.js';
 import { createDbClient, type DbClient } from './db/client.js';
 import { createDbReadinessCheck } from './db/readiness.js';
+import { createAuth, type Auth } from './auth/auth.js';
+import { registerAuthRoutes } from './auth/plugin.js';
+import { organizationRoutes } from './routes/organizations.js';
+import { onboardingRoutes } from './routes/onboarding.js';
+import { createInvitationService } from './services/invitation-service.js';
 import { createPostgresProjectRepository } from './repositories/postgres/postgres-project-repository.js';
 import { createPostgresDomainRepository } from './repositories/postgres/postgres-domain-repository.js';
 import { createPostgresSitemapRepository } from './repositories/postgres/postgres-sitemap-repository.js';
@@ -52,6 +57,10 @@ export interface AppOptions {
   // Overrides the /readyz database check directly (tests that don't care
   // about DB behavior can pass `async () => true`).
   checkDatabaseReady?: () => Promise<boolean>;
+  // Auth injection point for tests. When omitted and repositories are also
+  // omitted (i.e. real Postgres path), buildApp() constructs the real
+  // Better Auth instance from the same db connection.
+  auth?: Auth;
 }
 
 // Client-supplied request IDs are only trusted if they look like a UUID/
@@ -74,12 +83,19 @@ export async function buildApp(options?: AppOptions) {
   let discoveredUrlRepository: DiscoveredUrlRepository;
   let checkDatabaseReady: () => Promise<boolean>;
 
+  // Auth is only mounted when a real (or explicitly injected) Better Auth
+  // instance is available. Fake-repo tests that don't care about auth can
+  // omit it entirely — /api/auth, /v1/organizations/*/invitations, and
+  // /v1/onboarding/accept simply aren't registered in that case.
+  let auth: Auth | null;
+
   if (injectedRepos) {
     projectRepository = options.projectRepository!;
     domainRepository = options.domainRepository!;
     sitemapRepository = options.sitemapRepository!;
     discoveredUrlRepository = options.discoveredUrlRepository!;
     checkDatabaseReady = options?.checkDatabaseReady ?? (async () => true);
+    auth = options?.auth ?? null;
   } else {
     dbClient = createDbClient(env.DATABASE_URL);
     projectRepository = createPostgresProjectRepository(dbClient.db);
@@ -87,10 +103,13 @@ export async function buildApp(options?: AppOptions) {
     sitemapRepository = createPostgresSitemapRepository(dbClient.db);
     discoveredUrlRepository = createPostgresDiscoveredUrlRepository(dbClient.db);
     checkDatabaseReady = options?.checkDatabaseReady ?? createDbReadinessCheck(dbClient);
+    auth = options?.auth ?? createAuth(dbClient.db);
   }
 
   const projectService = createProjectService(projectRepository);
   const domainService = createDomainService(domainRepository);
+  const authDb = dbClient?.db ?? null;
+  const invitationService = authDb ? createInvitationService(authDb) : null;
 
   const capacity = createCapacityController({
     maxConcurrent: options?.maxConcurrentRenders ?? env.MAX_CONCURRENT_RENDERS,
@@ -113,8 +132,21 @@ export async function buildApp(options?: AppOptions) {
           'req.headers["x-admin-api-key"]',
           'req.headers["x-render-api-key"]',
           'req.headers.cookie',
+          'req.headers["set-cookie"]',
           'res.headers["set-cookie"]',
           'req.headers["proxy-authorization"]',
+          'req.body.password',
+          'req.body.token',
+          'req.body.newPassword',
+          'req.body.currentPassword',
+          '*.password',
+          '*.token',
+          '*.tokenHash',
+          '*.sessionToken',
+          '*.apiKey',
+          '*.secret',
+          '*.betterAuthSecret',
+          '*.verificationToken',
         ],
         censor: '[redacted]',
       },
@@ -139,13 +171,37 @@ export async function buildApp(options?: AppOptions) {
   await app.register(helmet, {
     contentSecurityPolicy: false,
   });
+  // Render API key requests (server-to-server, no cookies) don't need CORS
+  // at all; browser management requests need exact-origin, credentialed
+  // CORS restricted to the configured trusted origins allowlist.
+  const trustedOrigins = new Set(env.AUTH_TRUSTED_ORIGINS);
   await app.register(cors, {
-    origin: false,
+    origin: (origin, cb) => {
+      if (!origin) {
+        // No Origin header: server-to-server / same-origin / curl. Allowed
+        // through CORS (not credentialed browser cross-site traffic); the
+        // render endpoint doesn't use cookies, and management endpoints are
+        // additionally protected by the Origin check in the CSRF module.
+        cb(null, true);
+        return;
+      }
+      cb(null, trustedOrigins.has(origin));
+    },
+    credentials: true,
   });
   await app.register(rateLimit, {
     max: 30,
     timeWindow: '1 minute',
   });
+
+  if (auth) {
+    await registerAuthRoutes(app, auth);
+  }
+
+  if (auth && authDb && invitationService) {
+    await app.register(organizationRoutes, { prefix: '/v1', auth, db: authDb, invitationService });
+    await app.register(onboardingRoutes, { prefix: '/v1', auth, invitationService });
+  }
 
   await app.register(healthRoutes, {
     isReady: async () =>

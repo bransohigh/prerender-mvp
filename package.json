@@ -21,12 +21,15 @@
     "playwright:install": "playwright install chromium",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/db/migrate.ts",
-    "db:seed:dev": "tsx scripts/db/seed-dev.ts"
+    "db:seed:dev": "tsx scripts/db/seed-dev.ts",
+    "auth:bootstrap-owner": "tsx scripts/auth/bootstrap-owner.ts"
   },
   "dependencies": {
+    "@better-auth/api-key": "1.6.23",
     "@fastify/cors": "^11.3.0",
     "@fastify/helmet": "^13.1.0",
     "@fastify/rate-limit": "^11.1.0",
+    "better-auth": "1.6.23",
     "dotenv": "^17.4.2",
     "drizzle-orm": "0.45.2",
     "fastify": "^5.10.0",
@@ -38,6 +41,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@better-auth/cli": "1.4.21",
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.1.1",
     "@types/pg": "8.20.0",
