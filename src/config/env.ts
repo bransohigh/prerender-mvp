@@ -13,18 +13,13 @@ const proxyUrlSchema = z
   })
   .optional();
 
-// Migration note (Phase 7, in progress): Better Auth is now the primary
-// auth system — new organization/onboarding routes (src/routes/organizations.ts,
-// src/routes/onboarding.ts) use ONLY session/invitation auth and must never
-// read or fall back to ADMIN_API_KEY/RENDER_API_KEY.
-//
-// ADMIN_API_KEY / RENDER_API_KEY are TRANSITIONAL/DEPRECATED: the old
-// unscoped project/domain/sitemap/render routes (src/routes/projects.ts,
-// domains.ts, sitemaps.ts, render.ts) still authenticate with these global
-// keys until Milestone 3 migrates them to session auth (management) and
-// project-scoped API keys (render). They will be removed entirely once
-// that migration lands — do not build new functionality on top of them.
-// See AUTHENTICATION.md.
+// Migration note (Phase 7 / Checkpoint 3B): global ADMIN_API_KEY and
+// RENDER_API_KEY have been removed entirely — management endpoints use
+// only Better Auth browser sessions, and /v1/render uses only
+// project-scoped API keys (x-render-api-key header, verified via
+// src/services/render-api-key-auth-service.ts). There is no fallback from
+// a project key to any global key. See AUTHENTICATION.md / TENANCY.md for
+// the breaking-change note.
 const envSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -37,9 +32,6 @@ const envSchema = z
     MAX_QUEUED_RENDERS: z.coerce.number().int().min(0).max(500).default(20),
     RENDER_QUEUE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(10000),
     OUTBOUND_PROXY_URL: proxyUrlSchema,
-    // TRANSITIONAL (see note above) — removed in Milestone 3.
-    ADMIN_API_KEY: z.string().min(32, 'ADMIN_API_KEY must be at least 32 characters'),
-    RENDER_API_KEY: z.string().min(32, 'RENDER_API_KEY must be at least 32 characters'),
     REQUIRE_OUTBOUND_PROXY: z
       .enum(['true', 'false'])
       .default('false')
@@ -53,6 +45,17 @@ const envSchema = z
     BETTER_AUTH_SECRET: z.string().min(32, 'BETTER_AUTH_SECRET must be at least 32 characters'),
     BETTER_AUTH_BASE_URL: z.string().url(),
     AUTH_TRUSTED_ORIGINS: z.string().min(1, 'AUTH_TRUSTED_ORIGINS must be set'),
+
+    // Process-local rate limits (see src/lib/rate-limiter.ts). Not shared
+    // across instances — documented limitation, not a Redis-backed limiter.
+    RENDER_KEY_INVALID_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(1000).default(20),
+    RENDER_KEY_INVALID_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).max(3_600_000).default(60_000),
+    RENDER_KEY_VALID_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(10_000).default(120),
+    RENDER_KEY_VALID_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).max(3_600_000).default(60_000),
+    LOGIN_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(1000).default(10),
+    LOGIN_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).max(3_600_000).default(60_000),
+    INVITATION_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(1000).default(10),
+    INVITATION_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).max(3_600_000).default(60_000),
   })
   .transform((raw) => ({
     ...raw,

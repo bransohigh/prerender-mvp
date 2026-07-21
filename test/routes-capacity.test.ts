@@ -2,9 +2,35 @@ import { describe, expect, it, afterEach, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { createFakeRepoSet, seedVerifiedDomain } from './helpers/fake-repos.js';
 import type { RenderFn } from '../src/types/render.js';
+import type { ApiKeyVerifier } from '../src/services/render-api-key-auth-service.js';
+import type { Project } from '../src/repositories/types.js';
 
-const RENDER_API_KEY = process.env['RENDER_API_KEY']!;
+const VALID_KEY = `pr_live_${'a'.repeat(56)}`;
+const ORG_ID = 'org_fake_1';
+const PROJECT_ID = '11111111-1111-1111-1111-111111111111';
 let domainId: string;
+
+function makeFakeVerifier(): ApiKeyVerifier {
+  return {
+    api: {
+      verifyApiKey: (async (args: { body: { key: string } }) => {
+        if (args.body.key !== VALID_KEY) {
+          return { valid: false, error: { message: 'Invalid API key', code: 'INVALID_API_KEY' }, key: null };
+        }
+        return {
+          valid: true,
+          error: null,
+          key: {
+            id: 'apikey_fake_1',
+            referenceId: ORG_ID,
+            metadata: { projectId: PROJECT_ID, createdByUserId: 'user_fake_1', revokedAt: null, rotatedFromKeyId: null, rotatedToKeyId: null },
+            expiresAt: null,
+          },
+        };
+      }) as ApiKeyVerifier['api']['verifyApiKey'],
+    },
+  };
+}
 
 function makeRenderResult() {
   return {
@@ -49,7 +75,7 @@ function postRender(app: Awaited<ReturnType<typeof buildApp>>, url = 'https://ex
   return app.inject({
     method: 'POST',
     url: '/v1/render',
-    headers: { 'x-render-api-key': RENDER_API_KEY },
+    headers: { 'x-render-api-key': VALID_KEY },
     payload: { domainId, url },
   });
 }
@@ -58,7 +84,25 @@ async function buildTestApp(renderUrl: RenderFn, extra: Record<string, unknown> 
   const repos = createFakeRepoSet();
   const domain = await seedVerifiedDomain(repos.domainRepository, 'example.com');
   domainId = domain.id;
-  return buildApp({ renderUrl, ...repos, ...extra });
+  return buildApp({
+    renderUrl,
+    ...repos,
+    renderApiKeyVerifier: makeFakeVerifier(),
+    renderTenant: {
+      getOrganizationStatus: async () => 'active' as const,
+      getProjectForOrganization: async (): Promise<Project | null> => ({
+        id: PROJECT_ID,
+        organizationId: ORG_ID,
+        name: 'P',
+        slug: 'p',
+        status: 'active',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }),
+      getDomainForOrganizationProject: async () => domain,
+    },
+    ...extra,
+  });
 }
 
 describe('POST /v1/render kapasite kontrolleri', () => {

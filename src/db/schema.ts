@@ -135,6 +135,13 @@ export const verification = pgTable(
   (table) => [index('verification_identifier_idx').on(table.identifier)],
 );
 
+// Better Auth's organization schema has no status/suspension field. This
+// is an application-level addition (drizzle/0004) — a plain column on the
+// same table (smallest durable option; no separate org_status table
+// needed for a two-value enum), not read/written by Better Auth itself,
+// so it can't be silently reset by an unrelated Better Auth operation.
+export const organizationStatusEnum = pgEnum('organization_status', ['active', 'suspended']);
+
 export const organization = pgTable(
   'organization',
   {
@@ -144,6 +151,7 @@ export const organization = pgTable(
     logo: text('logo'),
     createdAt: timestamp('created_at').notNull(),
     metadata: text('metadata'),
+    status: organizationStatusEnum('status').notNull().default('active'),
   },
   (table) => [uniqueIndex('organization_slug_uidx').on(table.slug)],
 );

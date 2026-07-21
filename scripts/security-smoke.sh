@@ -10,14 +10,18 @@ COMPOSE_FILE="compose.hardened.yml"
 RENDERER_SERVICE="renderer-api"
 POSTGRES_SERVICE="postgres"
 API_URL="http://127.0.0.1:3000"
-ADMIN_API_KEY="${ADMIN_API_KEY:-}"
-RENDER_API_KEY="${RENDER_API_KEY:-}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}"
-
-if [[ -z "$ADMIN_API_KEY" || -z "$RENDER_API_KEY" ]]; then
-  echo "ERROR: ADMIN_API_KEY and RENDER_API_KEY environment variables must be set"
-  exit 1
-fi
+# Breaking change (Checkpoint 3B): no more global ADMIN_API_KEY/RENDER_API_KEY.
+# This script bootstraps its own owner/org/project/domain/render-key below,
+# using the non-interactive BOOTSTRAP_OWNER_PASSWORD fallback documented in
+# scripts/auth/bootstrap-owner.ts (smoke/CI only, never production).
+BOOTSTRAP_OWNER_PASSWORD="smoke-owner-$(openssl rand -hex 16)"
+BOOTSTRAP_OWNER_EMAIL="smoke-owner@example.com"
+# Must exactly match a configured AUTH_TRUSTED_ORIGINS entry — sent as the
+# Origin header on cookie-authenticated mutations (see src/lib/csrf.ts).
+BETTER_AUTH_BASE_URL="${BETTER_AUTH_BASE_URL:-http://localhost:3000}"
+COOKIE_JAR="$(mktemp)"
+trap 'rm -f "$COOKIE_JAR"' EXIT
 
 PASS=0
 FAIL=0
@@ -395,8 +399,8 @@ for port in "${BLOCKED_PORTS[@]}"; do
   fi
 done
 
-# ---- Renderer API ----
-section "Renderer API (via gateway)"
+# ---- Renderer API (bootstrap-owner -> session -> org-scoped project-key render) ----
+section "Renderer API (project-scoped key flow)"
 
 HEALTH=$(curl -sf --connect-timeout 5 --max-time 10 "$API_URL/health" 2>/dev/null || echo '{"error":"timeout"}')
 if echo "$HEALTH" | jq -e '.status == "ok"' > /dev/null 2>&1; then
@@ -405,30 +409,57 @@ else
   fail "/health failed: $HEALTH"
 fi
 
-# Render now requires a domainId for a *verified* domain. Real DNS TXT
-# verification isn't available for a real hostname in CI, so this smoke
-# test marks a domain verified directly via SQL — a test-only shortcut for
-# the render-authorization smoke check, not a substitute for the DNS/HTML
-# verification unit+db tests (see test/domain-verification-service.test.ts).
-PROJECT_RESPONSE=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/projects" \
+# 1. Bootstrap the first owner (non-interactive fallback documented in
+# scripts/auth/bootstrap-owner.ts — smoke/CI only).
+BOOTSTRAP_OUT=$(docker compose -f "$COMPOSE_FILE" exec -T \
+  -e BOOTSTRAP_OWNER_PASSWORD="$BOOTSTRAP_OWNER_PASSWORD" \
+  "$RENDERER_SERVICE" node dist/scripts/auth/bootstrap-owner.js \
+  --email="$BOOTSTRAP_OWNER_EMAIL" --name="Smoke Owner" --org-name="Smoke Org" 2>&1) || true
+if echo "$BOOTSTRAP_OUT" | grep -q "Owner bootstrap complete"; then
+  pass "auth:bootstrap-owner creates the first user + organization"
+else
+  fail "bootstrap-owner failed: $(echo "$BOOTSTRAP_OUT" | head -c 300)"
+fi
+
+# 2. Login and obtain a session cookie.
+LOGIN_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_JAR" --connect-timeout 5 --max-time 10 \
+  -X POST "$API_URL/api/auth/sign-in/email" \
   -H "content-type: application/json" \
-  -H "x-admin-api-key: $ADMIN_API_KEY" \
+  -d "{\"email\":\"$BOOTSTRAP_OWNER_EMAIL\",\"password\":\"$BOOTSTRAP_OWNER_PASSWORD\"}" 2>/dev/null || echo "000")
+if [[ "$LOGIN_STATUS" == "200" ]] && grep -q "session_token" "$COOKIE_JAR" 2>/dev/null; then
+  pass "Login succeeds and a session cookie is obtained"
+else
+  fail "Login failed (status $LOGIN_STATUS) or no session cookie set"
+fi
+
+ORG_LIST=$(curl -sf -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 "$API_URL/v1/organizations" 2>/dev/null || echo '{}')
+ORG_ID=$(echo "$ORG_LIST" | jq -r '.items[0].id // empty')
+if [[ -n "$ORG_ID" ]]; then
+  pass "GET /v1/organizations returns the bootstrapped organization"
+else
+  fail "Could not resolve organization id: $(echo "$ORG_LIST" | head -c 200)"
+fi
+
+# 3. Create an organization-scoped project.
+PROJECT_RESPONSE=$(curl -sf -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/organizations/$ORG_ID/projects" \
+  -H "content-type: application/json" -H "origin: $BETTER_AUTH_BASE_URL" \
   -d '{"name":"Smoke Test Project"}' 2>/dev/null || echo '{"error":"timeout"}')
 PROJECT_ID=$(echo "$PROJECT_RESPONSE" | jq -r '.id // empty')
 if [[ -n "$PROJECT_ID" ]]; then
-  pass "POST /v1/projects creates a project"
+  pass "POST .../projects creates an organization-scoped project"
 else
-  fail "POST /v1/projects failed: $(echo "$PROJECT_RESPONSE" | head -c 200)"
+  fail "POST .../projects failed: $(echo "$PROJECT_RESPONSE" | head -c 200)"
 fi
 
-DOMAIN_RESPONSE=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/projects/$PROJECT_ID/domains" \
-  -H "content-type: application/json" \
-  -H "x-admin-api-key: $ADMIN_API_KEY" \
+# 4. Create + verify the fixture domain (DNS TXT verification isn't
+# available for a real hostname in CI, so this marks it verified directly
+# via SQL — a test-only shortcut, not a substitute for the DNS/HTML
+# verification unit+db tests).
+DOMAIN_RESPONSE=$(curl -sf -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/organizations/$ORG_ID/projects/$PROJECT_ID/domains" \
+  -H "content-type: application/json" -H "origin: $BETTER_AUTH_BASE_URL" \
   -d '{"hostname":"example.com","verificationMethod":"dns_txt"}' 2>/dev/null || echo '{"error":"timeout"}')
 DOMAIN_ID=$(echo "$DOMAIN_RESPONSE" | jq -r '.domain.id // empty')
-if [[ -n "$DOMAIN_ID" ]] && ! echo "$DOMAIN_RESPONSE" | jq -e 'has("token") or (.verification.token // "" | length > 0)' > /dev/null 2>&1; then
-  fail "Domain create response is missing verification.token"
-elif [[ -n "$DOMAIN_ID" ]]; then
+if [[ -n "$DOMAIN_ID" ]] && echo "$DOMAIN_RESPONSE" | jq -e '.verification.token // "" | length > 0' > /dev/null 2>&1; then
   pass "POST domain creates a pending domain with a one-time verification token"
 else
   fail "POST domain failed: $(echo "$DOMAIN_RESPONSE" | head -c 200)"
@@ -439,14 +470,26 @@ if [[ -n "$POSTGRES_PASSWORD" ]]; then
     psql -U prerender -d prerender -c \
     "UPDATE domains SET status='verified', verified_at=now() WHERE id='$DOMAIN_ID'" > /dev/null 2>&1 || true
 fi
-VERIFIED_CHECK=$(curl -sf --connect-timeout 5 --max-time 10 "$API_URL/v1/domains/$DOMAIN_ID" \
-  -H "x-admin-api-key: $ADMIN_API_KEY" 2>/dev/null || echo '{}')
+VERIFIED_CHECK=$(curl -sf -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 "$API_URL/v1/organizations/$ORG_ID/domains/$DOMAIN_ID" 2>/dev/null || echo '{}')
 if echo "$VERIFIED_CHECK" | jq -e '.status == "verified"' > /dev/null 2>&1; then
   pass "Domain marked verified (test-only DB shortcut) for render authorization check"
 else
   fail "Could not mark domain verified for smoke test: $(echo "$VERIFIED_CHECK" | head -c 200)"
 fi
 
+# 5. Create the project-scoped render API key.
+KEY_RESPONSE=$(curl -sf -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/organizations/$ORG_ID/projects/$PROJECT_ID/api-keys" \
+  -H "content-type: application/json" -H "origin: $BETTER_AUTH_BASE_URL" \
+  -d '{"name":"Smoke Key"}' 2>/dev/null || echo '{"error":"timeout"}')
+RENDER_API_KEY=$(echo "$KEY_RESPONSE" | jq -r '.key // empty')
+API_KEY_ID=$(echo "$KEY_RESPONSE" | jq -r '.id // empty')
+if [[ -n "$RENDER_API_KEY" && "$RENDER_API_KEY" == pr_live_* ]]; then
+  pass "Project API key created with pr_live_ prefix, plaintext shown once"
+else
+  fail "Project API key creation failed: $(echo "$KEY_RESPONSE" | head -c 200)"
+fi
+
+# 6. Render a real page with the project-scoped key.
 RENDER=$(curl -sf --connect-timeout 10 --max-time 30 -X POST "$API_URL/v1/render" \
   -H "content-type: application/json" \
   -H "x-render-api-key: $RENDER_API_KEY" \
@@ -454,14 +497,33 @@ RENDER=$(curl -sf --connect-timeout 10 --max-time 30 -X POST "$API_URL/v1/render
 
 if echo "$RENDER" | jq -e '.html | length > 100' > /dev/null 2>&1; then
   TITLE=$(echo "$RENDER" | jq -r '.title // "unknown"')
-  pass "Render successful for verified domain — title: $TITLE"
+  pass "Render successful for verified domain with project-scoped key — title: $TITLE"
 else
   fail "Render failed for verified domain: $(echo "$RENDER" | head -c 200)"
 fi
 
-UNVERIFIED_DOMAIN_RESPONSE=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/projects/$PROJECT_ID/domains" \
+# 7. Cross-project render rejected: a key from a second project must not
+# render the first project's domain.
+PROJECT2_RESPONSE=$(curl -sf -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/organizations/$ORG_ID/projects" \
+  -H "content-type: application/json" -H "origin: $BETTER_AUTH_BASE_URL" \
+  -d '{"name":"Smoke Test Project 2"}' 2>/dev/null || echo '{}')
+PROJECT2_ID=$(echo "$PROJECT2_RESPONSE" | jq -r '.id // empty')
+KEY2_RESPONSE=$(curl -sf -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/organizations/$ORG_ID/projects/$PROJECT2_ID/api-keys" \
+  -H "content-type: application/json" -H "origin: $BETTER_AUTH_BASE_URL" \
+  -d '{"name":"Smoke Key 2"}' 2>/dev/null || echo '{}')
+RENDER_API_KEY_2=$(echo "$KEY2_RESPONSE" | jq -r '.key // empty')
+CROSS_PROJECT_RENDER=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/render" \
   -H "content-type: application/json" \
-  -H "x-admin-api-key: $ADMIN_API_KEY" \
+  -H "x-render-api-key: $RENDER_API_KEY_2" \
+  -d "{\"domainId\":\"$DOMAIN_ID\",\"url\":\"https://example.com\"}" 2>/dev/null || echo "000")
+if [[ "$CROSS_PROJECT_RENDER" == "404" ]]; then
+  pass "Cross-project render rejected (404, key from project 2 cannot render project 1's domain)"
+else
+  fail "Cross-project render returned $CROSS_PROJECT_RENDER, expected 404"
+fi
+
+UNVERIFIED_DOMAIN_RESPONSE=$(curl -sf -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/organizations/$ORG_ID/projects/$PROJECT_ID/domains" \
+  -H "content-type: application/json" -H "origin: $BETTER_AUTH_BASE_URL" \
   -d '{"hostname":"unverified-smoke.example.com","verificationMethod":"dns_txt"}' 2>/dev/null || echo '{"error":"timeout"}')
 UNVERIFIED_DOMAIN_ID=$(echo "$UNVERIFIED_DOMAIN_RESPONSE" | jq -r '.domain.id // empty')
 UNVERIFIED_RENDER=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/render" \
@@ -474,6 +536,7 @@ else
   fail "Render on unverified domain returned $UNVERIFIED_RENDER, expected 409"
 fi
 
+# 8. Confirm old global-key / legacy-header behavior fails.
 OLD_HEADER_RENDER=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/render" \
   -H "content-type: application/json" \
   -H "x-api-key: $RENDER_API_KEY" \
@@ -482,6 +545,46 @@ if [[ "$OLD_HEADER_RENDER" == "401" ]]; then
   pass "Legacy x-api-key header no longer authenticates /v1/render"
 else
   fail "Legacy x-api-key header returned $OLD_HEADER_RENDER, expected 401"
+fi
+
+OLD_ADMIN_MGMT=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/projects" \
+  -H "content-type: application/json" \
+  -H "x-admin-api-key: any-value-whatsoever" \
+  -d '{"name":"x"}' 2>/dev/null || echo "000")
+if [[ "$OLD_ADMIN_MGMT" == "410" ]]; then
+  pass "Legacy unscoped management endpoint returns 410 (x-admin-api-key grants nothing)"
+else
+  fail "Legacy management endpoint returned $OLD_ADMIN_MGMT, expected 410"
+fi
+
+# 9. Revoke the key.
+REVOKE_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 \
+  -X DELETE "$API_URL/v1/organizations/$ORG_ID/projects/$PROJECT_ID/api-keys/$API_KEY_ID" \
+  -H "origin: $BETTER_AUTH_BASE_URL" 2>/dev/null || echo "000")
+if [[ "$REVOKE_STATUS" == "200" ]]; then
+  pass "Render API key revoked"
+else
+  fail "Key revoke returned $REVOKE_STATUS, expected 200"
+fi
+
+# 10. Confirm the revoked key fails.
+REVOKED_RENDER=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/render" \
+  -H "content-type: application/json" \
+  -H "x-render-api-key: $RENDER_API_KEY" \
+  -d "{\"domainId\":\"$DOMAIN_ID\",\"url\":\"https://example.com\"}" 2>/dev/null || echo "000")
+if [[ "$REVOKED_RENDER" == "401" ]]; then
+  pass "Revoked key rejected (401)"
+else
+  fail "Revoked key returned $REVOKED_RENDER, expected 401"
+fi
+
+# 11. Logout, then confirm the logged-out session is rejected.
+curl -s -o /dev/null -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 -X POST "$API_URL/api/auth/sign-out" > /dev/null 2>&1 || true
+LOGGED_OUT_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 "$API_URL/v1/organizations" 2>/dev/null || echo "000")
+if [[ "$LOGGED_OUT_STATUS" == "401" ]]; then
+  pass "Logged-out session is rejected on the next management request"
+else
+  fail "Logged-out session returned $LOGGED_OUT_STATUS, expected 401"
 fi
 
 # ---- Observability ----
@@ -541,7 +644,7 @@ else
   fail "Render success metric not found after a successful render"
 fi
 
-if echo "$METRICS_INTERNAL" | grep -qE "$ADMIN_API_KEY|$RENDER_API_KEY"; then
+if echo "$METRICS_INTERNAL" | grep -qF "$RENDER_API_KEY"; then
   fail "Metrics output contains an API key"
 else
   pass "Metrics output does not contain an API key"
@@ -558,7 +661,7 @@ section "Container Log Hygiene"
 
 RENDERER_LOGS=$(docker compose -f "$COMPOSE_FILE" logs "$RENDERER_SERVICE" 2>/dev/null || echo "")
 
-if echo "$RENDERER_LOGS" | grep -qE "$ADMIN_API_KEY|$RENDER_API_KEY"; then
+if echo "$RENDERER_LOGS" | grep -qF "$RENDER_API_KEY"; then
   fail "Renderer container logs contain an API key"
 else
   pass "Renderer container logs do not contain an API key"

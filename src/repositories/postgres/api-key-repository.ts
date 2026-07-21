@@ -82,14 +82,13 @@ export interface ApiKeyRow {
   metadata: ApiKeyMetadata | null;
 }
 
-function parseAndValidateMetadata(raw: string | null): ApiKeyMetadata | null {
-  if (!raw) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
+// Shared fail-closed metadata validator — used both when reading our own
+// stored rows (parseAndValidateMetadata, below) and when validating the
+// metadata object Better Auth's own auth.api.verifyApiKey hands back at
+// render time (src/services/render-api-key-auth-service.ts). Better Auth's
+// verify path checks the secret/enabled/expiresAt only — it never
+// validates metadata *shape* — so this is the only place that does.
+export function validateApiKeyMetadataObject(parsed: unknown): ApiKeyMetadata | null {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
   const obj = parsed as Record<string, unknown>;
 
@@ -114,6 +113,17 @@ function parseAndValidateMetadata(raw: string | null): ApiKeyMetadata | null {
     rotatedFromKeyId: (obj['rotatedFromKeyId'] as string | undefined) ?? null,
     rotatedToKeyId: (obj['rotatedToKeyId'] as string | undefined) ?? null,
   };
+}
+
+function parseAndValidateMetadata(raw: string | null): ApiKeyMetadata | null {
+  if (!raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  return validateApiKeyMetadataObject(parsed);
 }
 
 function toRow(row: typeof apikey.$inferSelect): ApiKeyRow {

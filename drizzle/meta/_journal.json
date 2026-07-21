@@ -29,6 +29,13 @@
       "when": 1784647150580,
       "tag": "0003_projects_organization_restrict_delete",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784652673478,
+      "tag": "0004_organization_status",
+      "breakpoints": true
     }
   ]
 }

@@ -18,10 +18,13 @@
 # `userns,` rule. Load it with:
 #   sudo apparmor_parser -Kr docker/security/chromium-apparmor.profile
 #
-# Secrets: POSTGRES_PASSWORD, ADMIN_API_KEY, RENDER_API_KEY must be supplied
-# via the environment (CI secrets, a local .env not committed, or a real
-# secret manager in production) — none are hardcoded here. See README.md
-# "Secret yönetimi".
+# Secrets: POSTGRES_PASSWORD, BETTER_AUTH_SECRET must be supplied via the
+# environment (CI secrets, a local .env not committed, or a real secret
+# manager in production) — none are hardcoded here. See README.md
+# "Secret yönetimi". Breaking change (Checkpoint 3B): the global
+# ADMIN_API_KEY/RENDER_API_KEY env vars no longer exist — management uses
+# a Better Auth session, rendering uses a project-scoped API key created
+# through the API (see AUTHENTICATION.md).
 #
 # Migration: run the one-shot `migrate` service to completion BEFORE
 # starting renderer-api — see README.md "Migration ve başlangıç sırası".
@@ -105,8 +108,9 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     environment:
-      - ADMIN_API_KEY=${ADMIN_API_KEY:?ADMIN_API_KEY must be set (min 32 chars)}
-      - RENDER_API_KEY=${RENDER_API_KEY:?RENDER_API_KEY must be set (min 32 chars)}
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set (min 32 chars)}
+      - BETTER_AUTH_BASE_URL=${BETTER_AUTH_BASE_URL:?BETTER_AUTH_BASE_URL must be set}
+      - AUTH_TRUSTED_ORIGINS=${AUTH_TRUSTED_ORIGINS:?AUTH_TRUSTED_ORIGINS must be set}
       - DATABASE_URL=postgres://prerender:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/prerender
       - HOST=0.0.0.0
       - PORT=3000

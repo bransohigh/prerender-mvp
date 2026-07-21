@@ -180,11 +180,25 @@ Ayrıntılar için bkz. [DOMAIN_VERIFICATION.md](DOMAIN_VERIFICATION.md) ve
 - CSRF (minimum, Milestone 2 kapsamı): organization-scoped route'larda her mutasyon (POST/PATCH/PUT/DELETE) `Origin` header'ının `AUTH_TRUSTED_ORIGINS` listesinde olmasını zorunlu kılar; eksik veya güvenilmeyen Origin → 404. CORS tek başına CSRF koruması olarak güvenilmez. `/v1/render` bu kontrole tabi değildir (cookie kullanmaz). Kapsamlı adversarial CSRF/CORS matrisi Milestone 3'e ertelendi.
 - Metrikler: `prerender_authorization_denials_total{reason}` — sabit değerler (`unauthenticated`/`not_member`/`insufficient_role`), asla user/org/project id içermez.
 
+## Render Authorization ve Rate Limiting (Checkpoint 3B)
+
+- Global `ADMIN_API_KEY`/`RENDER_API_KEY`/`x-admin-api-key` tamamen kaldırıldı, fallback yok. `/v1/render` yalnızca `x-render-api-key` (proje bazlı) kabul eder; body/query'de anahtar, eski `x-api-key`, veya browser session render için asla kabul edilmez.
+- Render authorization sırası (capacity slot alınmadan önce tamamlanır): header format → invalid-key IP rate limit → Better Auth key verification → metadata fail-closed validation → org aktif → proje aktif+key'in projesiyle eşleşiyor → domain aynı projeye ait → domain verified → URL exact hostname match → SSRF/public-URL kontrolü → valid-key rate limit (key id bazlı) → capacity → Chromium.
+- Better Auth'un `auth.api.verifyApiKey`'i yalnızca secret'ı doğrular (hash, enabled, expiresAt) — metadata şeklini doğrulamaz. `src/services/render-api-key-auth-service.ts` metadata'yı bağımsız olarak fail-closed doğrular.
+- API key rotation: tek Postgres transaction'ı içinde `SELECT ... FOR UPDATE` ile satır kilitlenir, successor eklenir, orijinal revoke edilir — eşzamanlı rotate denemelerinde yalnızca biri başarılı olur, diğerleri satır kilidinde bekleyip güncel revoked state'i görüp 409 döner. Compensating restore yoktur; başarısız transaction Postgres'in kendi rollback'i ile orijinal key'i değiştirmeden bırakır.
+- Rate limiting (process-local, in-memory, `src/lib/rate-limiter.ts` — dağıtık değildir, çoklu instance'ta her instance kendi sayaçlarına sahiptir):
+  - Geçersiz render key denemeleri: kaynak IP bazlı.
+  - Geçerli render key istekleri: key id bazlı (asla plaintext key).
+  - Login: IP + normalize edilmiş email'in HMAC-SHA256 digest'i (asla ham email).
+  - Invitation accept: IP + token'ın HMAC-SHA256 digest'i (asla ham token).
+  - Tüm limitler `Retry-After` header'ı ile 429 + sabit `RATE_LIMITED` kodu döner. Başarılı işlem ilgili bucket'ı sıfırlar (kalıcı ceza yok).
+- Metrikler: `prerender_render_requests_total{result}` sabit değerlerle genişletildi (`invalid_key`, `expired_key`, `revoked_key`, `malformed_metadata`, `rate_limited`, `organization_suspended`, `project_suspended`, `domain_not_verified`, `domain_mismatch`) — asla key/org/project/domain id, hostname, URL, IP, request id içermez.
+- Redaction: `x-render-api-key` header'ı ve body/query'de olası key/token alias alanları normal request logging'e ulaşmadan reddedilir.
+- Organization suspend: `organization.status` sütunu (`active`/`suspended`, uygulama seviyesi, Better Auth'un kendi şemasında yok) — mevcut organizasyonlar migration'da `active`'e backfill edilir, sütun NOT NULL.
+
 ## Sonraki Adımlar
 
-- Proje bazlı render API key'leri (global `RENDER_API_KEY` kaldırılması)
 - Audit log
-- Auth-specific rate limiting (login, invitation, session)
 - Kapsamlı CSRF/CORS adversarial test matrisi
 - Periyodik domain re-verification
 - Container image vulnerability scanning

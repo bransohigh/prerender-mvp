@@ -26,9 +26,10 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      ADMIN_API_KEY: ci-admin-api-key-minimum-32-characters-long
-      RENDER_API_KEY: ci-render-api-key-minimum-32-characters-long
       DATABASE_URL: postgres://prerender:ci-test-password-not-used-in-prod@localhost:5432/prerender_test
+      BETTER_AUTH_SECRET: ci-better-auth-secret-minimum-32-characters-long
+      BETTER_AUTH_BASE_URL: http://localhost:3000
+      AUTH_TRUSTED_ORIGINS: http://localhost:3000
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -71,8 +72,9 @@ jobs:
 
       - name: Generate secrets for this run
         run: |
-          echo "ADMIN_API_KEY=ci-admin-$(openssl rand -hex 16)" >> "$GITHUB_ENV"
-          echo "RENDER_API_KEY=ci-render-$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          echo "BETTER_AUTH_SECRET=ci-auth-$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+          echo "BETTER_AUTH_BASE_URL=http://127.0.0.1:3000" >> "$GITHUB_ENV"
+          echo "AUTH_TRUSTED_ORIGINS=http://127.0.0.1:3000" >> "$GITHUB_ENV"
           echo "POSTGRES_PASSWORD=ci-pg-$(openssl rand -hex 16)" >> "$GITHUB_ENV"
 
       - name: Validate compose configs

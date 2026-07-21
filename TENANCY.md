@@ -120,11 +120,26 @@ Owner/admin may fetch; member may read (`GET`) but not fetch (`POST`).
 Reuses the existing `fetchAndParseSitemapSource` (gzip/XXE/redirect/size
 limits, proxy routing, off-domain URL rejection all unchanged).
 
-## Not yet implemented (tracked for a later milestone)
+## Project-scoped render API keys and organization status (Checkpoint 3B)
+
+Render authorization is now fully tenant-scoped: a render API key carries
+`organizationId` + `projectId`, and every render request re-checks
+organization status, project status/scope, and domain scope+status before
+touching Chromium. See AUTHENTICATION.md and SECURITY.md for the exact key
+model and authorization sequence.
+
+`organization.status` (`active`/`suspended`) is an application-level column
+added directly to the `organization` table (`drizzle/0004_organization_status.sql`)
+— Better Auth's own schema has no status/suspension concept. Existing rows
+backfill to `active` via the column default; the column is `NOT NULL`.
+There is no suspend/unsuspend management endpoint in this checkpoint (out
+of scope per the checkpoint instructions) — only the repository/schema
+support and test fixtures exist so render authorization can enforce it.
+
+## Not yet implemented (tracked for a later checkpoint)
 
 - Ownership transfer.
-- Project-scoped render API keys (Milestone 3) — render authorization still
-  uses the transitional global `RENDER_API_KEY`.
+- Organization suspend/unsuspend management endpoint.
 - Full CSRF/CORS adversarial test matrix (only the minimum Origin check is
-  tested this milestone).
-- Audit log (Milestone 3).
+  tested; Checkpoint 3C covers the full matrix).
+- Audit log (Checkpoint 3C).

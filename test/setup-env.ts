@@ -7,7 +7,3 @@ process.env['DATABASE_URL'] ??= 'postgres://postgres:postgres@localhost:5432/pre
 process.env['BETTER_AUTH_SECRET'] ??= 'test-better-auth-secret-minimum-32-characters-long';
 process.env['BETTER_AUTH_BASE_URL'] ??= 'http://localhost:3000';
 process.env['AUTH_TRUSTED_ORIGINS'] ??= 'http://localhost:3000';
-// TRANSITIONAL — see src/config/env.ts. Only the old, not-yet-migrated
-// project/domain/sitemap/render routes still read these.
-process.env['ADMIN_API_KEY'] ??= 'test-admin-api-key-minimum-32-characters';
-process.env['RENDER_API_KEY'] ??= 'test-render-api-key-minimum-32-characters';

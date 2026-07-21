@@ -6,9 +6,9 @@ import type { RenderFn } from '../src/types/render.js';
 // Functional project/domain management now lives entirely under
 // organization-scoped routes (test/db/tenancy-*.test.ts, real Postgres) —
 // this file only pins the legacy-endpoint migration contract: every old
-// unscoped management route is permanently 410, and ADMIN_API_KEY does not
-// restore access to any of them.
-const ADMIN_API_KEY = process.env['ADMIN_API_KEY']!;
+// unscoped management route is permanently 410. ADMIN_API_KEY no longer
+// exists at all (removed in Checkpoint 3B) — an arbitrary
+// x-admin-api-key header must not restore access either.
 
 function makeFakeRenderUrl(): RenderFn {
   return vi.fn<RenderFn>().mockResolvedValue({
@@ -61,12 +61,12 @@ describe('legacy unscoped management endpoints (410 Gone)', () => {
       expect(res.json().error).toBe('ENDPOINT_MIGRATED');
     });
 
-    it(`${endpoint.method} ${endpoint.url} returns 410 even with a valid ADMIN_API_KEY`, async () => {
+    it(`${endpoint.method} ${endpoint.url} returns 410 even with an x-admin-api-key header`, async () => {
       app = await buildTestApp();
       const res = await app.inject({
         method: endpoint.method,
         url: endpoint.url,
-        headers: { 'x-admin-api-key': ADMIN_API_KEY },
+        headers: { 'x-admin-api-key': 'any-value-whatsoever' },
       });
       expect(res.statusCode).toBe(410);
       expect(res.json().error).toBe('ENDPOINT_MIGRATED');

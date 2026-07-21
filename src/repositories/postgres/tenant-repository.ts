@@ -8,6 +8,7 @@ import {
   member as memberTable,
   invitations,
   user as userTable,
+  organization as organizationTable,
 } from '../../db/schema.js';
 import { AppError } from '../../lib/app-error.js';
 import type {
@@ -80,6 +81,37 @@ export function createTenantRepository(db: Database) {
     return (rows[0]?.domain as Domain) ?? null;
   }
 
+  // Render-path lookup: requires organization AND project scope together
+  // (not just organization), so a key scoped to project A can never
+  // resolve a domain that belongs to project B in the same organization.
+  async function getDomainForOrganizationProject(
+    organizationId: string,
+    projectId: string,
+    domainId: string,
+  ): Promise<Domain | null> {
+    const rows = await db
+      .select({ domain: domains })
+      .from(domains)
+      .innerJoin(projects, eq(domains.projectId, projects.id))
+      .where(
+        and(
+          eq(domains.id, domainId),
+          eq(domains.projectId, projectId),
+          eq(projects.organizationId, organizationId),
+        ),
+      )
+      .limit(1);
+    return (rows[0]?.domain as Domain) ?? null;
+  }
+
+  async function getOrganizationStatus(organizationId: string): Promise<'active' | 'suspended' | null> {
+    const row = await db.query.organization.findFirst({
+      where: eq(organizationTable.id, organizationId),
+      columns: { status: true },
+    });
+    return row?.status ?? null;
+  }
+
   async function getSitemapSourceForOrganization(organizationId: string, sourceId: string): Promise<SitemapSource | null> {
     const rows = await db
       .select({ source: sitemapSources })
@@ -93,6 +125,8 @@ export function createTenantRepository(db: Database) {
 
   return {
     getDomainForOrganization,
+    getDomainForOrganizationProject,
+    getOrganizationStatus,
     getSitemapSourceForOrganization,
     // ---- projects ----------------------------------------------------
     async createProjectForOrganization(organizationId: string, input: CreateProjectInput): Promise<Project> {

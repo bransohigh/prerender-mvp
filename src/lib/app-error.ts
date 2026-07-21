@@ -39,6 +39,7 @@ export type AppErrorCode =
   | 'API_KEY_EXPIRED'
   | 'API_KEY_REVOKED'
   | 'API_KEY_NOT_FOUND'
+  | 'API_KEY_METADATA_INVALID'
   | 'ORGANIZATION_SUSPENDED'
   | 'PROJECT_SUSPENDED';
 
@@ -79,6 +80,7 @@ const STATUS_BY_CODE: Record<AppErrorCode, number> = {
   API_KEY_EXPIRED: 401,
   API_KEY_REVOKED: 401,
   API_KEY_NOT_FOUND: 404, // management-route "key not found in this project", distinct from render-time API_KEY_INVALID (401)
+  API_KEY_METADATA_INVALID: 401,
   ORGANIZATION_SUSPENDED: 403,
   PROJECT_SUSPENDED: 403,
 };

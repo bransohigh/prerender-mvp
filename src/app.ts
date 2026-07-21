@@ -34,6 +34,8 @@ import type {
   DiscoveredUrlRepository,
 } from './repositories/types.js';
 import type { RenderFn } from './types/render.js';
+import type { ApiKeyVerifier } from './services/render-api-key-auth-service.js';
+import { createTenantRepository, type TenantRepository } from './repositories/postgres/tenant-repository.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -61,6 +63,11 @@ export interface AppOptions {
   // omitted (i.e. real Postgres path), buildApp() constructs the real
   // Better Auth instance from the same db connection.
   auth?: Auth;
+  // Render-path injection points for fake-repo unit tests (real Postgres
+  // path always uses the real `auth`/`createTenantRepository(dbClient.db)`
+  // pair — these are ignored in that case).
+  renderApiKeyVerifier?: ApiKeyVerifier;
+  renderTenant?: Pick<TenantRepository, 'getOrganizationStatus' | 'getProjectForOrganization' | 'getDomainForOrganizationProject'>;
 }
 
 // Client-supplied request IDs are only trusted if they look like a UUID/
@@ -219,10 +226,28 @@ export async function buildApp(options?: AppOptions) {
       (await checkDatabaseReady()),
   });
   await app.register(metricsRoutes, { metrics });
+
+  // Fake-repo test default: denies every key (no valid scope can ever be
+  // constructed without a real Postgres-backed apikey/organization/project
+  // row) — tests that specifically exercise a successful render inject
+  // options.renderApiKeyVerifier/renderTenant instead.
+  const denyAllVerifier: ApiKeyVerifier = {
+    api: { verifyApiKey: (async () => ({ valid: false, error: { code: 'INVALID_API_KEY' }, key: null })) as ApiKeyVerifier['api']['verifyApiKey'] },
+  };
+  const denyAllTenant: NonNullable<AppOptions['renderTenant']> = {
+    getOrganizationStatus: async () => null,
+    getProjectForOrganization: async () => null,
+    getDomainForOrganizationProject: async () => null,
+  };
+
+  const renderApiKeyVerifier: ApiKeyVerifier = authDb ? auth! : (options?.renderApiKeyVerifier ?? denyAllVerifier);
+  const renderTenant = authDb ? createTenantRepository(authDb) : (options?.renderTenant ?? denyAllTenant);
+
   await app.register(renderRoutes, {
     prefix: '/v1',
     renderUrl: service.renderUrl,
-    domainRepository,
+    auth: renderApiKeyVerifier,
+    tenant: renderTenant,
     metrics,
     getCapacitySnapshot: () => {
       const snapshot = service.getSnapshot();

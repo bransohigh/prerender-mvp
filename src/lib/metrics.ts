@@ -14,7 +14,19 @@ export type RenderResultLabel =
   | 'queue_timeout'
   | 'capacity_closed'
   | 'unauthorized'
-  | 'bad_request';
+  | 'bad_request'
+  // Checkpoint 3B: project-key render authorization outcomes. Fixed,
+  // low-cardinality values only — never a key id/org id/project id/domain
+  // id/hostname/URL/IP/request id.
+  | 'invalid_key'
+  | 'expired_key'
+  | 'revoked_key'
+  | 'malformed_metadata'
+  | 'rate_limited'
+  | 'organization_suspended'
+  | 'project_suspended'
+  | 'domain_not_verified'
+  | 'domain_mismatch';
 
 export type UrlRejectionReason =
   | 'protocol'

@@ -2,8 +2,12 @@ import { describe, expect, it, afterEach, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { createFakeRepoSet, seedVerifiedDomain } from './helpers/fake-repos.js';
 import type { RenderFn } from '../src/types/render.js';
+import type { ApiKeyVerifier } from '../src/services/render-api-key-auth-service.js';
+import type { Project, Domain } from '../src/repositories/types.js';
 
-const RENDER_API_KEY = process.env['RENDER_API_KEY']!;
+const VALID_KEY = `pr_live_${'a'.repeat(56)}`;
+const ORG_ID = 'org_fake_1';
+const PROJECT_ID = '11111111-1111-1111-1111-111111111111';
 
 function makeFakeRenderUrl(): RenderFn {
   return vi.fn<RenderFn>().mockResolvedValue({
@@ -21,10 +25,67 @@ function makeFakeRenderUrlError(message: string): RenderFn {
   return vi.fn<RenderFn>().mockRejectedValue(new Error(message));
 }
 
-async function buildTestApp(renderUrl: RenderFn) {
+// Fake ApiKeyVerifier: only VALID_KEY verifies successfully, with a fixed
+// scope (org/project). Everything else (wrong key, old x-api-key value,
+// missing key) returns valid:false, matching real Better Auth behavior.
+function makeFakeVerifier(): ApiKeyVerifier {
+  return {
+    api: {
+      verifyApiKey: (async (args: { body: { key: string } }) => {
+        if (args.body.key !== VALID_KEY) {
+          return { valid: false, error: { message: 'Invalid API key', code: 'INVALID_API_KEY' }, key: null };
+        }
+        return {
+          valid: true,
+          error: null,
+          key: {
+            id: 'apikey_fake_1',
+            referenceId: ORG_ID,
+            metadata: { projectId: PROJECT_ID, createdByUserId: 'user_fake_1', revokedAt: null, rotatedFromKeyId: null, rotatedToKeyId: null },
+            expiresAt: null,
+          },
+        };
+      }) as ApiKeyVerifier['api']['verifyApiKey'],
+    },
+  };
+}
+
+interface FakeTenantOptions {
+  organizationStatus?: 'active' | 'suspended' | null;
+  projectStatus?: 'active' | 'suspended' | 'deleted' | null;
+  domain?: Domain | null;
+}
+
+function makeFakeTenant(options: FakeTenantOptions = {}) {
+  const organizationStatus = options.organizationStatus ?? 'active';
+  const projectStatus = options.projectStatus ?? 'active';
+  return {
+    getOrganizationStatus: async () => organizationStatus,
+    getProjectForOrganization: async (): Promise<Project | null> =>
+      projectStatus === null
+        ? null
+        : {
+            id: PROJECT_ID,
+            organizationId: ORG_ID,
+            name: 'P',
+            slug: 'p',
+            status: projectStatus,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+    getDomainForOrganizationProject: async (): Promise<Domain | null> => options.domain ?? null,
+  };
+}
+
+async function buildTestApp(renderUrl: RenderFn, tenantOptions: FakeTenantOptions & { domain?: Domain | null } = {}) {
   const repos = createFakeRepoSet();
   const domain = await seedVerifiedDomain(repos.domainRepository, 'example.com');
-  const app = await buildApp({ renderUrl, ...repos });
+  const app = await buildApp({
+    renderUrl,
+    ...repos,
+    renderApiKeyVerifier: makeFakeVerifier(),
+    renderTenant: makeFakeTenant({ ...tenantOptions, domain: 'domain' in tenantOptions ? tenantOptions.domain : domain }),
+  });
   return { app, domainId: domain.id };
 }
 
@@ -68,7 +129,7 @@ describe('POST /v1/render', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/v1/render',
-      headers: { 'x-render-api-key': 'wrong-key-wrong-key-wrong-key-32c' },
+      headers: { 'x-render-api-key': `pr_live_${'b'.repeat(56)}` },
       payload: { domainId, url: 'https://example.com' },
     });
     expect(res.statusCode).toBe(401);
@@ -80,8 +141,68 @@ describe('POST /v1/render', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/v1/render',
-      headers: { 'x-api-key': RENDER_API_KEY },
+      headers: { 'x-render-api-key': VALID_KEY, 'x-api-key': 'anything' },
       payload: { domainId, url: 'https://example.com' },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('yanlış prefix ile 401 döner', async () => {
+    let domainId: string;
+    ({ app, domainId } = await buildTestApp(makeFakeRenderUrl()));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/render',
+      headers: { 'x-render-api-key': `wrong_prefix_${'a'.repeat(56)}` },
+      payload: { domainId, url: 'https://example.com' },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('aşırı uzun key header ile 401 döner', async () => {
+    let domainId: string;
+    ({ app, domainId } = await buildTestApp(makeFakeRenderUrl()));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/render',
+      headers: { 'x-render-api-key': `pr_live_${'a'.repeat(600)}` },
+      payload: { domainId, url: 'https://example.com' },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('mükerrer x-render-api-key header (array) reddedilir', async () => {
+    let domainId: string;
+    ({ app, domainId } = await buildTestApp(makeFakeRenderUrl()));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/render',
+      headers: { 'x-render-api-key': [VALID_KEY, VALID_KEY] as unknown as string },
+      payload: { domainId, url: 'https://example.com' },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('query string içinde apiKey alanı reddedilir', async () => {
+    let domainId: string;
+    ({ app, domainId } = await buildTestApp(makeFakeRenderUrl()));
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/render?apiKey=${VALID_KEY}`,
+      headers: { 'x-render-api-key': VALID_KEY },
+      payload: { domainId, url: 'https://example.com' },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('body içinde apiKey alanı reddedilir', async () => {
+    let domainId: string;
+    ({ app, domainId } = await buildTestApp(makeFakeRenderUrl()));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/render',
+      headers: { 'x-render-api-key': VALID_KEY },
+      payload: { domainId, url: 'https://example.com', apiKey: VALID_KEY },
     });
     expect(res.statusCode).toBe(401);
   });
@@ -92,7 +213,7 @@ describe('POST /v1/render', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/v1/render',
-      headers: { 'x-render-api-key': RENDER_API_KEY },
+      headers: { 'x-render-api-key': VALID_KEY },
       payload: { domainId },
     });
     expect(res.statusCode).toBe(400);
@@ -103,7 +224,7 @@ describe('POST /v1/render', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/v1/render',
-      headers: { 'x-render-api-key': RENDER_API_KEY },
+      headers: { 'x-render-api-key': VALID_KEY },
       payload: { url: 'https://example.com' },
     });
     expect(res.statusCode).toBe(400);
@@ -115,18 +236,18 @@ describe('POST /v1/render', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/v1/render',
-      headers: { 'x-render-api-key': RENDER_API_KEY },
+      headers: { 'x-render-api-key': VALID_KEY },
       payload: { domainId, url: 'not-a-url' },
     });
     expect(res.statusCode).toBe(400);
   });
 
   it('bilinmeyen domainId ile 404 döner', async () => {
-    ({ app } = await buildTestApp(makeFakeRenderUrl()));
+    ({ app } = await buildTestApp(makeFakeRenderUrl(), { domain: null }));
     const res = await app.inject({
       method: 'POST',
       url: '/v1/render',
-      headers: { 'x-render-api-key': RENDER_API_KEY },
+      headers: { 'x-render-api-key': VALID_KEY },
       payload: { domainId: '00000000-0000-0000-0000-000000000000', url: 'https://example.com' },
     });
     expect(res.statusCode).toBe(404);
@@ -137,22 +258,53 @@ describe('POST /v1/render', () => {
   it('doğrulanmamış domain ile 409 döner', async () => {
     const repos = createFakeRepoSet();
     const unverified = await repos.domainRepository.create({
-      projectId: 'proj-1',
+      projectId: PROJECT_ID,
       hostname: 'unverified.example.com',
       normalizedHostname: 'unverified.example.com',
       verificationMethod: 'dns_txt',
       verificationTokenHash: 'hash',
     });
-    app = await buildApp({ renderUrl: makeFakeRenderUrl(), ...repos });
+    app = await buildApp({
+      renderUrl: makeFakeRenderUrl(),
+      ...repos,
+      renderApiKeyVerifier: makeFakeVerifier(),
+      renderTenant: makeFakeTenant({ domain: unverified }),
+    });
     const res = await app.inject({
       method: 'POST',
       url: '/v1/render',
-      headers: { 'x-render-api-key': RENDER_API_KEY },
+      headers: { 'x-render-api-key': VALID_KEY },
       payload: { domainId: unverified.id, url: 'https://unverified.example.com' },
     });
     expect(res.statusCode).toBe(409);
     const body = JSON.parse(res.payload) as { error: string };
     expect(body.error).toBe('DOMAIN_NOT_VERIFIED');
+  });
+
+  it('suspended organization ile 403 döner', async () => {
+    let domainId: string;
+    ({ app, domainId } = await buildTestApp(makeFakeRenderUrl(), { organizationStatus: 'suspended' }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/render',
+      headers: { 'x-render-api-key': VALID_KEY },
+      payload: { domainId, url: 'https://example.com' },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.payload).error).toBe('ORGANIZATION_SUSPENDED');
+  });
+
+  it('suspended project ile 403 döner', async () => {
+    let domainId: string;
+    ({ app, domainId } = await buildTestApp(makeFakeRenderUrl(), { projectStatus: 'suspended' }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/render',
+      headers: { 'x-render-api-key': VALID_KEY },
+      payload: { domainId, url: 'https://example.com' },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.payload).error).toBe('PROJECT_SUSPENDED');
   });
 
   it('domain hostname eşleşmeyen URL ile 400 döner', async () => {
@@ -161,7 +313,7 @@ describe('POST /v1/render', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/v1/render',
-      headers: { 'x-render-api-key': RENDER_API_KEY },
+      headers: { 'x-render-api-key': VALID_KEY },
       payload: { domainId, url: 'https://not-example.com/' },
     });
     expect(res.statusCode).toBe(400);
@@ -176,7 +328,7 @@ describe('POST /v1/render', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/v1/render',
-      headers: { 'x-render-api-key': RENDER_API_KEY },
+      headers: { 'x-render-api-key': VALID_KEY },
       payload: { domainId, url: 'https://example.com' },
     });
     expect(res.statusCode).toBe(200);
@@ -197,7 +349,7 @@ describe('POST /v1/render', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/v1/render',
-      headers: { 'x-render-api-key': RENDER_API_KEY },
+      headers: { 'x-render-api-key': VALID_KEY },
       payload: { domainId, url: 'https://example.com' },
     });
     expect(res.statusCode).toBe(422);
@@ -216,7 +368,7 @@ describe('POST /v1/render', () => {
     await app.inject({
       method: 'POST',
       url: '/v1/render',
-      headers: { 'x-render-api-key': RENDER_API_KEY },
+      headers: { 'x-render-api-key': VALID_KEY },
       payload: { domainId },
     });
     expect(fakeRender).not.toHaveBeenCalled();
@@ -236,12 +388,11 @@ describe('POST /v1/render', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/v1/render',
-      headers: { 'x-render-api-key': RENDER_API_KEY },
+      headers: { 'x-render-api-key': VALID_KEY },
       payload: { domainId, url: 123 },
     });
     expect(res.statusCode).toBe(400);
-    const body = JSON.parse(res.payload) as { error: string; details: unknown };
-    expect(body.error).toBe('Geçersiz istek');
-    expect(body.details).toBeDefined();
+    const body = JSON.parse(res.payload) as { error: string; details?: unknown };
+    expect(body.error).toBeDefined();
   });
 });

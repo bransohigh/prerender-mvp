@@ -11,6 +11,14 @@ import { bootstrapOwner, BootstrapOwnerError } from '../../src/services/bootstra
 // Password is deliberately never accepted as a CLI argument (would leak via
 // shell history / process listing / CI logs) — it is read from an
 // interactive, non-echoed stdin prompt.
+//
+// Non-interactive fallback (Docker/CI smoke automation ONLY): when stdin is
+// not a TTY, the password is read from the BOOTSTRAP_OWNER_PASSWORD
+// environment variable instead of prompting. This is documented and
+// intentionally narrow — env vars don't appear in shell history or `ps`
+// output the way a CLI argument would, but this path should only be used
+// by automated smoke/CI flows that generate a random password per run,
+// never for a real production bootstrap (use the interactive prompt there).
 
 const ASCII_CR = 13;
 const ASCII_LF = 10;
@@ -90,11 +98,24 @@ async function main(): Promise<void> {
   const db = drizzle(pool, { schema });
 
   try {
-    const password = await readHiddenLine('Set owner password (min 12 chars): ');
-    const confirm = await readHiddenLine('Confirm password: ');
-    if (password !== confirm) {
-      console.error('Passwords do not match.');
-      process.exit(1);
+    let password: string;
+    if (process.stdin.isTTY) {
+      const confirm = await readHiddenLine('Set owner password (min 12 chars): ').then(async (p) => {
+        const c = await readHiddenLine('Confirm password: ');
+        if (p !== c) {
+          console.error('Passwords do not match.');
+          process.exit(1);
+        }
+        return p;
+      });
+      password = confirm;
+    } else {
+      const envPassword = process.env['BOOTSTRAP_OWNER_PASSWORD'];
+      if (!envPassword) {
+        console.error('FATAL: not running in a TTY and BOOTSTRAP_OWNER_PASSWORD is not set. See file header comment.');
+        process.exit(1);
+      }
+      password = envPassword;
     }
 
     const result = await bootstrapOwner(db, { email, name, password, orgName, orgSlug });
