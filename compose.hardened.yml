@@ -6,6 +6,10 @@
 #   direct internet access is blocked by application-level SSRF controls.
 #   Port 3000 is published to 127.0.0.1 only.
 #
+#   renderer-api → database network → postgres (no host port, no external
+#   network). egress-proxy is NOT a member of the database network and
+#   cannot reach postgres. postgres has no outbound internet access at all.
+#
 # AppArmor: the renderer-api service requires the custom "chromium-hardened"
 # profile (docker/security/chromium-apparmor.profile) to be loaded into the
 # kernel before `up`. On Ubuntu 23.10+/24.04+ hosts, AppArmor blocks
@@ -14,18 +18,96 @@
 # `userns,` rule. Load it with:
 #   sudo apparmor_parser -Kr docker/security/chromium-apparmor.profile
 #
+# Secrets: POSTGRES_PASSWORD, ADMIN_API_KEY, RENDER_API_KEY must be supplied
+# via the environment (CI secrets, a local .env not committed, or a real
+# secret manager in production) — none are hardcoded here. See README.md
+# "Secret yönetimi".
+#
+# Migration: run the one-shot `migrate` service to completion BEFORE
+# starting renderer-api — see README.md "Migration ve başlangıç sırası".
+#   docker compose -f compose.hardened.yml run --rm migrate
+#
 # Usage:
 #   sudo apparmor_parser -Kr docker/security/chromium-apparmor.profile
-#   docker compose -f compose.hardened.yml up --build -d
+#   docker compose -f compose.hardened.yml up --build -d postgres
+#   docker compose -f compose.hardened.yml run --rm migrate
+#   docker compose -f compose.hardened.yml up --build -d renderer-api egress-proxy
 #   docker compose -f compose.hardened.yml down -v --remove-orphans
 
 services:
+  postgres:
+    image: postgres:16.6-bookworm
+    environment:
+      - POSTGRES_USER=prerender
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=prerender
+    # No `ports:` — not published to the host, reachable only from the
+    # `database` network. No `external` network membership — no outbound
+    # internet access.
+    networks:
+      - database
+    volumes:
+      - postgres-hardened-data:/var/lib/postgresql/data
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1
+    pids_limit: 100
+    stop_grace_period: 15s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prerender -d prerender"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 10
+
+  # One-shot migration runner — same image as renderer-api, different
+  # command. Must complete successfully before renderer-api starts (see
+  # README.md). Non-root (inherits USER pwuser from Dockerfile). Only on
+  # the `database` network — no egress-proxy, no external network.
+  migrate:
+    build: .
+    command: ["node", "dist/scripts/db/migrate.js"]
+    environment:
+      - DATABASE_URL=postgres://prerender:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/prerender
+    networks:
+      - database
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 50
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   renderer-api:
     build: .
     ports:
       - "127.0.0.1:3000:3000"
     environment:
-      - API_KEY=${API_KEY:-hardened-test-key-32chars-min}
+      - ADMIN_API_KEY=${ADMIN_API_KEY:?ADMIN_API_KEY must be set (min 32 chars)}
+      - RENDER_API_KEY=${RENDER_API_KEY:?RENDER_API_KEY must be set (min 32 chars)}
+      - DATABASE_URL=postgres://prerender:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/prerender
       - HOST=0.0.0.0
       - PORT=3000
       - LOG_LEVEL=info
@@ -38,6 +120,7 @@ services:
       - REQUIRE_OUTBOUND_PROXY=true
     networks:
       - internal
+      - database
     init: true
     read_only: true
     cap_drop:
@@ -69,6 +152,8 @@ services:
     depends_on:
       egress-proxy:
         condition: service_started
+      postgres:
+        condition: service_healthy
 
   egress-proxy:
     image: ubuntu/squid:6.6-24.04_edge
@@ -112,3 +197,9 @@ services:
 networks:
   internal:
   external:
+  # Renderer <-> Postgres only. egress-proxy is intentionally never a
+  # member of this network.
+  database:
+
+volumes:
+  postgres-hardened-data:

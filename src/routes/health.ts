@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
 export interface HealthRouteOptions {
-  isReady: () => boolean;
+  isReady: () => boolean | Promise<boolean>;
 }
 
 export const healthRoutes: FastifyPluginAsync<HealthRouteOptions> = async (
@@ -23,7 +23,7 @@ export const healthRoutes: FastifyPluginAsync<HealthRouteOptions> = async (
   // Does NOT require a browser to already be open — Chromium launches
   // lazily on first render.
   app.get('/readyz', noRateLimit, async (_request, reply) => {
-    if (!isReady()) {
+    if (!(await isReady())) {
       return reply.code(503).send({ status: 'not_ready' });
     }
     return { status: 'ready' };

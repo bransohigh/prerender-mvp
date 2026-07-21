@@ -1,8 +1,10 @@
 import { describe, expect, it, afterEach, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
+import { createFakeRepoSet, seedVerifiedDomain } from './helpers/fake-repos.js';
 import type { RenderFn } from '../src/types/render.js';
 
-const VALID_API_KEY = process.env['API_KEY'] ?? 'test-api-key-12345';
+const RENDER_API_KEY = process.env['RENDER_API_KEY']!;
+let domainId: string;
 
 function makeRenderResult() {
   return {
@@ -47,9 +49,16 @@ function postRender(app: Awaited<ReturnType<typeof buildApp>>, url = 'https://ex
   return app.inject({
     method: 'POST',
     url: '/v1/render',
-    headers: { 'x-api-key': VALID_API_KEY },
-    payload: { url },
+    headers: { 'x-render-api-key': RENDER_API_KEY },
+    payload: { domainId, url },
   });
+}
+
+async function buildTestApp(renderUrl: RenderFn, extra: Record<string, unknown> = {}) {
+  const repos = createFakeRepoSet();
+  const domain = await seedVerifiedDomain(repos.domainRepository, 'example.com');
+  domainId = domain.id;
+  return buildApp({ renderUrl, ...repos, ...extra });
 }
 
 describe('POST /v1/render kapasite kontrolleri', () => {
@@ -61,8 +70,7 @@ describe('POST /v1/render kapasite kontrolleri', () => {
 
   it('kapasite doluyken üçüncü istek sıraya alınır ve başarılı olur', async () => {
     const { fn, blockers } = makeBlockingRenderUrl();
-    app = await buildApp({
-      renderUrl: fn,
+    app = await buildTestApp(fn, {
       maxConcurrentRenders: 2,
       maxQueuedRenders: 5,
       renderQueueTimeoutMs: 5000,
@@ -91,8 +99,7 @@ describe('POST /v1/render kapasite kontrolleri', () => {
 
   it('queue doluyken sonraki istek 503 alır', async () => {
     const { fn, blockers } = makeBlockingRenderUrl();
-    app = await buildApp({
-      renderUrl: fn,
+    app = await buildTestApp(fn, {
       maxConcurrentRenders: 1,
       maxQueuedRenders: 1,
       renderQueueTimeoutMs: 5000,
@@ -124,8 +131,7 @@ describe('POST /v1/render kapasite kontrolleri', () => {
 
   it('queue timeout olduğunda 503 ve doğru error code döner', async () => {
     const { fn, blockers } = makeBlockingRenderUrl();
-    app = await buildApp({
-      renderUrl: fn,
+    app = await buildTestApp(fn, {
       maxConcurrentRenders: 1,
       maxQueuedRenders: 5,
       renderQueueTimeoutMs: 50,
@@ -145,8 +151,7 @@ describe('POST /v1/render kapasite kontrolleri', () => {
 
   it('503 cevabında Retry-After header bulunur', async () => {
     const { fn, blockers } = makeBlockingRenderUrl();
-    app = await buildApp({
-      renderUrl: fn,
+    app = await buildTestApp(fn, {
       maxConcurrentRenders: 1,
       maxQueuedRenders: 0,
       renderQueueTimeoutMs: 5000,
@@ -171,8 +176,7 @@ describe('POST /v1/render kapasite kontrolleri', () => {
       return makeRenderResult();
     };
 
-    app = await buildApp({
-      renderUrl: errorRender,
+    app = await buildTestApp(errorRender, {
       maxConcurrentRenders: 1,
       maxQueuedRenders: 5,
       renderQueueTimeoutMs: 5000,
@@ -187,8 +191,7 @@ describe('POST /v1/render kapasite kontrolleri', () => {
 
   it('503 cevabı dahili hata ayrıntısı sızdırmaz', async () => {
     const { fn, blockers } = makeBlockingRenderUrl();
-    app = await buildApp({
-      renderUrl: fn,
+    app = await buildTestApp(fn, {
       maxConcurrentRenders: 1,
       maxQueuedRenders: 0,
       renderQueueTimeoutMs: 5000,

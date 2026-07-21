@@ -34,6 +34,26 @@ export interface CapacitySnapshotMetrics {
   maxQueued: number;
 }
 
+export type DomainVerificationMethodLabel = 'dns_txt' | 'html_file';
+export type DomainVerificationResultLabel = 'success' | 'failure';
+
+export type SitemapFetchTypeLabel = 'robots' | 'sitemap' | 'sitemap_index' | 'manual';
+export type SitemapFetchResultLabel = 'success' | 'failure';
+
+export type DatabaseOperationLabel =
+  | 'project_create'
+  | 'project_read'
+  | 'project_update'
+  | 'project_delete'
+  | 'domain_create'
+  | 'domain_read'
+  | 'domain_update'
+  | 'sitemap_source_upsert'
+  | 'sitemap_source_update'
+  | 'discovered_url_upsert'
+  | 'ping';
+export type DatabaseOperationResultLabel = 'success' | 'failure';
+
 export interface Metrics {
   observeRenderDuration: (seconds: number) => void;
   observeQueueWait: (seconds: number) => void;
@@ -43,6 +63,18 @@ export interface Metrics {
   incrementBrowserDisconnect: () => void;
   incrementBrowserLaunchFailure: () => void;
   incrementUrlRejection: (reason: UrlRejectionReason) => void;
+  incrementDomainVerification: (
+    method: DomainVerificationMethodLabel,
+    result: DomainVerificationResultLabel,
+  ) => void;
+  observeDomainVerificationDuration: (seconds: number) => void;
+  incrementSitemapFetch: (type: SitemapFetchTypeLabel, result: SitemapFetchResultLabel) => void;
+  observeSitemapFetchDuration: (seconds: number) => void;
+  incrementSitemapUrlsDiscovered: (count: number) => void;
+  incrementDatabaseOperation: (
+    operation: DatabaseOperationLabel,
+    result: DatabaseOperationResultLabel,
+  ) => void;
   getMetrics: () => Promise<string>;
   getContentType: () => string;
   reset: () => void;
@@ -162,6 +194,47 @@ export function createMetrics(options?: CreateMetricsOptions): Metrics {
     registers: [register],
   });
 
+  const domainVerificationTotal = new Counter({
+    name: `${prefix}domain_verification_total`,
+    help: 'Total domain verification attempts by method and result',
+    labelNames: ['method', 'result'] as const,
+    registers: [register],
+  });
+
+  const domainVerificationDurationSeconds = new Histogram({
+    name: `${prefix}domain_verification_duration_seconds`,
+    help: 'Domain verification attempt duration in seconds',
+    buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
+    registers: [register],
+  });
+
+  const sitemapFetchTotal = new Counter({
+    name: `${prefix}sitemap_fetch_total`,
+    help: 'Total sitemap fetch attempts by source type and result',
+    labelNames: ['type', 'result'] as const,
+    registers: [register],
+  });
+
+  const sitemapFetchDurationSeconds = new Histogram({
+    name: `${prefix}sitemap_fetch_duration_seconds`,
+    help: 'Sitemap fetch+parse duration in seconds',
+    buckets: [0.1, 0.25, 0.5, 1, 2, 5, 10, 20],
+    registers: [register],
+  });
+
+  const sitemapUrlsDiscoveredTotal = new Counter({
+    name: `${prefix}sitemap_urls_discovered_total`,
+    help: 'Total URLs discovered across all sitemap fetches',
+    registers: [register],
+  });
+
+  const databaseOperationsTotal = new Counter({
+    name: `${prefix}database_operations_total`,
+    help: 'Total database operations by fixed operation name and result',
+    labelNames: ['operation', 'result'] as const,
+    registers: [register],
+  });
+
   return {
     observeRenderDuration(seconds) {
       safe(() => renderDurationSeconds.observe(seconds));
@@ -192,6 +265,24 @@ export function createMetrics(options?: CreateMetricsOptions): Metrics {
     incrementUrlRejection(reason) {
       safe(() => urlRejectionsTotal.labels(reason).inc());
     },
+    incrementDomainVerification(method, result) {
+      safe(() => domainVerificationTotal.labels(method, result).inc());
+    },
+    observeDomainVerificationDuration(seconds) {
+      safe(() => domainVerificationDurationSeconds.observe(seconds));
+    },
+    incrementSitemapFetch(type, result) {
+      safe(() => sitemapFetchTotal.labels(type, result).inc());
+    },
+    observeSitemapFetchDuration(seconds) {
+      safe(() => sitemapFetchDurationSeconds.observe(seconds));
+    },
+    incrementSitemapUrlsDiscovered(count) {
+      safe(() => sitemapUrlsDiscoveredTotal.inc(count));
+    },
+    incrementDatabaseOperation(operation, result) {
+      safe(() => databaseOperationsTotal.labels(operation, result).inc());
+    },
     async getMetrics() {
       try {
         return await register.metrics();
@@ -219,6 +310,12 @@ export function createNoopMetrics(): Metrics {
     incrementBrowserDisconnect() {},
     incrementBrowserLaunchFailure() {},
     incrementUrlRejection() {},
+    incrementDomainVerification() {},
+    observeDomainVerificationDuration() {},
+    incrementSitemapFetch() {},
+    observeSitemapFetchDuration() {},
+    incrementSitemapUrlsDiscovered() {},
+    incrementDatabaseOperation() {},
     async getMetrics() {
       return '';
     },

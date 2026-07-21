@@ -10,10 +10,19 @@ Prometheus server container.
 | Endpoint | Amaç | Kontrol ettikleri |
 |----------|------|--------------------|
 | `GET /livez` | Liveness — process ayakta mı | Hiçbir şey; yalnızca Fastify cevap veriyor mu. I/O, kapasite kontrolü veya browser etkileşimi yapmaz. |
-| `GET /readyz` | Readiness — yeni render isteği kabul edilebilir mi | Capacity controller kapalı mı, uygulama shutdown sürecinde mi. Hazırsa `200 {"status":"ready"}`, değilse `503 {"status":"not_ready"}`. Chromium'un o anda açık olması gerekmez — lazy launch korunur. |
+| `GET /readyz` | Readiness — yeni render isteği kabul edilebilir mi | Capacity controller kapalı mı, uygulama shutdown sürecinde mi, **veritabanı bağlantısı kullanılabilir mi**, hardened modda outbound proxy config geçerli mi. Hazırsa `200 {"status":"ready"}`, değilse `503 {"status":"not_ready"}`. Chromium'un o anda açık olması gerekmez — lazy launch korunur. |
 | `GET /health` | Geriye dönük uyumluluk | `/livez` ile aynı davranış. **Deprecated** — yeni entegrasyonlar `/livez` + `/readyz` kullanmalı. |
 
 Docker healthcheck (`Dockerfile`, `compose.hardened.yml`) `/readyz` kullanır.
+
+### Database readiness
+
+`/readyz`'in veritabanı kontrolü hafif bir `SELECT 1` sorgusudur
+(`src/db/client.ts` `ping()`), 1 saniye timeout ile. Her istekte ağır
+sorgu çalıştırmamak için sonuç 3 saniye cache'lenir
+(`src/db/readiness.ts`). PostgreSQL kapalıysa/erişilemezse `/readyz`
+`503` döner; `/livez` bundan **etkilenmez**, her zaman `200` döner
+(liveness process-only'dir, DB'ye hiç bakmaz).
 
 ## Metrics
 
@@ -46,6 +55,16 @@ tarafından sık sık pollanır ve `/v1/render` çağıranlarla aynı bütçeyi 
 | `prerender_browser_disconnects_total` | Counter | — | Beklenmeyen disconnect sayısı (graceful `close()` hariç) |
 | `prerender_browser_launch_failures_total` | Counter | — | Başarısız launch denemesi sayısı |
 | `prerender_url_rejections_total` | Counter | `reason` | SSRF/güvenlik reddi nedeni: `protocol`, `credentials`, `hostname`, `port`, `private_ip`, `dns`, `redirect`, `resource`, `unknown` |
+| `prerender_domain_verification_total` | Counter | `method`, `result` | Domain doğrulama denemesi: `method`=`dns_txt`\|`html_file`, `result`=`success`\|`failure` |
+| `prerender_domain_verification_duration_seconds` | Histogram | — | Domain doğrulama denemesi süresi |
+| `prerender_sitemap_fetch_total` | Counter | `type`, `result` | Sitemap fetch denemesi: `type`=`robots`\|`sitemap`\|`sitemap_index`\|`manual`, `result`=`success`\|`failure` |
+| `prerender_sitemap_fetch_duration_seconds` | Histogram | — | Sitemap fetch+parse süresi |
+| `prerender_sitemap_urls_discovered_total` | Counter | — | Tüm sitemap fetch'leri boyunca keşfedilen toplam URL sayısı |
+| `prerender_database_operations_total` | Counter | `operation`, `result` | Sabit, önceden tanımlı operation isimleri (`project_create`, `domain_create`, `sitemap_source_upsert`, `ping` vb.), `result`=`success`\|`failure` |
+
+Domain, hostname, project ID, domain ID, sitemap URL veya verification
+token **hiçbir metric label'ında kullanılmaz** — `method`, `result`,
+`type`, `operation` sabit literal union tipleridir.
 
 `collectDefaultMetrics` açık (Node.js process/event-loop/GC/heap metrikleri,
 `prerender_` prefix'i ile). Ekstra runtime flag gerekmez (`--expose-gc` GC
@@ -116,6 +135,18 @@ olarak hesaplanır — küçük context/page kurulum overhead'ini de içeren bir
 yaklaşık değerdir. Tam kapasite-kuyruğu bekleme süresi ayrıca
 `prerender_queue_wait_duration_seconds` histogram'ında (capacity
 controller'ın kendi ölçtüğü, daha kesin değer) mevcuttur.
+
+### Domain / sitemap log alanları
+
+Domain ve sitemap endpoint'leri ek olarak şu alanları loglar:
+`projectId`, `domainId`, `verificationMethod`, `sitemapSourceId`,
+`discoveredCount`. Project/domain UUID'leri loglanabilir (bunlar rastgele
+üretilmiş, tahmin edilemez kimliklerdir) — ancak **hiçbir zaman** metric
+label'ı olarak kullanılmazlar (cardinality/PII riski).
+
+**Asla loglanmaz:** verification token (plaintext veya hash), DNS TXT'nin
+tam değeri, HTML verification body'si, sitemap XML gövdesi, database
+connection string (`DATABASE_URL`).
 
 `event` değerleri: `render_completed`, `render_rejected`, `render_failed`.
 

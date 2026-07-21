@@ -11,8 +11,24 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16.6-bookworm
+        env:
+          POSTGRES_USER: prerender
+          POSTGRES_PASSWORD: ci-test-password-not-used-in-prod
+          POSTGRES_DB: prerender_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U prerender -d prerender_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
-      API_KEY: ci-test-api-key-minimum-8-chars
+      ADMIN_API_KEY: ci-admin-api-key-minimum-32-characters-long
+      RENDER_API_KEY: ci-render-api-key-minimum-32-characters-long
+      DATABASE_URL: postgres://prerender:ci-test-password-not-used-in-prod@localhost:5432/prerender_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,7 +39,11 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run typecheck
       - run: npm run lint
+      - name: Run database migrations
+        run: npm run db:migrate
       - run: npm test
+      - name: Run database integration tests
+        run: npm run test:db
       - run: npm run build
 
   docker-security:
@@ -49,6 +69,12 @@ jobs:
           sudo apparmor_parser -Kr docker/security/chromium-apparmor.profile
           sudo grep -q '^chromium-hardened ' /sys/kernel/security/apparmor/profiles
 
+      - name: Generate secrets for this run
+        run: |
+          echo "ADMIN_API_KEY=ci-admin-$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          echo "RENDER_API_KEY=ci-render-$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          echo "POSTGRES_PASSWORD=ci-pg-$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+
       - name: Validate compose configs
         run: |
           docker compose config > /dev/null
@@ -57,11 +83,26 @@ jobs:
       - name: Build hardened images
         run: docker compose -f compose.hardened.yml build
 
-      - name: Generate API key and start stack
+      - name: Start PostgreSQL and wait for healthy
         run: |
-          export API_KEY="ci-$(openssl rand -hex 16)"
-          echo "API_KEY=$API_KEY" >> "$GITHUB_ENV"
-          docker compose -f compose.hardened.yml up -d
+          docker compose -f compose.hardened.yml up -d postgres
+          for i in $(seq 1 30); do
+            STATUS=$(docker compose -f compose.hardened.yml ps postgres --format json | jq -r '.Health // "starting"')
+            if [ "$STATUS" = "healthy" ]; then
+              echo "PostgreSQL healthy after $((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "PostgreSQL did not become healthy after 60s"
+          docker compose -f compose.hardened.yml logs postgres
+          exit 1
+
+      - name: Run migration (must succeed before renderer starts)
+        run: docker compose -f compose.hardened.yml run --rm migrate
+
+      - name: Start renderer-api and egress-proxy
+        run: docker compose -f compose.hardened.yml up -d renderer-api egress-proxy
 
       - name: Wait for healthy
         run: |

@@ -1,16 +1,22 @@
 import http from 'node:http';
 import { describe, expect, it, afterAll, beforeAll } from 'vitest';
-import { buildApp } from '../../src/app.js';
 import { createRenderer, type Renderer } from '../../src/services/renderer.js';
 import { createDefaultLauncher } from '../../src/lib/browser-launch.js';
+import { createCapacityController } from '../../src/services/render-capacity.js';
+import { createRenderService } from '../../src/services/render-service.js';
 import type { UrlValidator } from '../../src/types/render.js';
 
-const VALID_API_KEY = process.env['API_KEY'] ?? 'test-api-key-12345';
+// NOTE: These tests exercise capacity+Chromium integration directly via
+// createRenderService(), not through the Fastify /v1/render HTTP route.
+// The route's domain-authorization layer (HTTPS + port 443 + exact
+// hostname match against a *verified* domain) cannot be satisfied by a
+// local ephemeral HTTP test server — that logic is already covered with
+// fake repositories in test/routes.test.ts. This file's purpose is
+// specifically the capacity-controller + real-Chromium wiring.
 
 let testServer: http.Server;
 let testOrigin: string;
 let renderer: Renderer;
-let app: Awaited<ReturnType<typeof buildApp>>;
 
 function createTestValidator(allowedOrigin: string): UrlValidator {
   return async (rawUrl: string): Promise<URL> => {
@@ -85,40 +91,31 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app?.close();
   await renderer.close();
   await new Promise<void>((resolve) => testServer.close(() => resolve()));
 });
 
-describe('E2E: Fastify → capacity → Chromium', () => {
+describe('E2E: capacity → Chromium', () => {
   it('başarılı render — JS sonrası içerik doğru', async () => {
-    app = await buildApp({
-      renderUrl: renderer.renderUrl,
-      maxConcurrentRenders: 2,
-      maxQueuedRenders: 5,
-      renderQueueTimeoutMs: 10000,
+    const capacity = createCapacityController({
+      maxConcurrent: 2,
+      maxQueued: 5,
+      queueTimeoutMs: 10000,
     });
+    const service = createRenderService(renderer.renderUrl, capacity);
 
-    const res = await app.inject({
-      method: 'POST',
-      url: '/v1/render',
-      headers: { 'x-api-key': VALID_API_KEY },
-      payload: { url: `${testOrigin}/dynamic` },
-    });
+    const result = await service.renderUrl(`${testOrigin}/dynamic`);
 
-    expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.payload) as Record<string, unknown>;
-    expect(body['title']).toBe('E2E Dynamic');
-    expect(body['html']).toContain('E2E Content');
-    expect(body['statusCode']).toBe(200);
-    expect(body['finalUrl']).toBe(`${testOrigin}/dynamic`);
-    expect(body['renderTimeMs']).toBeGreaterThan(0);
+    expect(result.title).toBe('E2E Dynamic');
+    expect(result.html).toContain('E2E Content');
+    expect(result.statusCode).toBe(200);
+    expect(result.finalUrl).toBe(`${testOrigin}/dynamic`);
+    expect(result.renderTimeMs).toBeGreaterThan(0);
+
+    capacity.close();
   });
 
   it('kapasite davranışı — maxConcurrent=1, ikinci istek queued', async () => {
-    await app?.close();
-
-    // Renderer with slow responses to control timing
     const slowRenderer = createRenderer({
       urlValidator: createTestValidator(testOrigin),
       renderTimeoutMs: 10000,
@@ -126,38 +123,23 @@ describe('E2E: Fastify → capacity → Chromium', () => {
       launchBrowser: createDefaultLauncher(),
     });
 
-    app = await buildApp({
-      renderUrl: slowRenderer.renderUrl,
-      maxConcurrentRenders: 1,
-      maxQueuedRenders: 5,
-      renderQueueTimeoutMs: 10000,
+    const capacity = createCapacityController({
+      maxConcurrent: 1,
+      maxQueued: 5,
+      queueTimeoutMs: 10000,
     });
+    const service = createRenderService(slowRenderer.renderUrl, capacity);
 
     // Both use /slow-render which takes ~500ms
-    const p1 = app.inject({
-      method: 'POST',
-      url: '/v1/render',
-      headers: { 'x-api-key': VALID_API_KEY },
-      payload: { url: `${testOrigin}/slow-render` },
-    });
-
-    const p2 = app.inject({
-      method: 'POST',
-      url: '/v1/render',
-      headers: { 'x-api-key': VALID_API_KEY },
-      payload: { url: `${testOrigin}/basic` },
-    });
+    const p1 = service.renderUrl(`${testOrigin}/slow-render`);
+    const p2 = service.renderUrl(`${testOrigin}/basic`);
 
     const [r1, r2] = await Promise.all([p1, p2]);
 
-    expect(r1.statusCode).toBe(200);
-    expect(r2.statusCode).toBe(200);
+    expect(r1.title).toBe('Slow Done');
+    expect(r2.title).toBe('Basic');
 
-    const b1 = JSON.parse(r1.payload) as Record<string, unknown>;
-    const b2 = JSON.parse(r2.payload) as Record<string, unknown>;
-    expect(b1['title']).toBe('Slow Done');
-    expect(b2['title']).toBe('Basic');
-
+    capacity.close();
     await slowRenderer.close();
   });
 });

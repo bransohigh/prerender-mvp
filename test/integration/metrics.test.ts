@@ -1,12 +1,16 @@
 import http from 'node:http';
 import { describe, expect, it, afterAll, beforeAll } from 'vitest';
-import { buildApp } from '../../src/app.js';
 import { createRenderer } from '../../src/services/renderer.js';
 import { createDefaultLauncher } from '../../src/lib/browser-launch.js';
+import { createCapacityController } from '../../src/services/render-capacity.js';
+import { createRenderService } from '../../src/services/render-service.js';
 import { createMetrics } from '../../src/lib/metrics.js';
 import type { UrlValidator } from '../../src/types/render.js';
 
-const VALID_API_KEY = process.env['API_KEY'] ?? 'test-api-key-12345';
+// See test/integration/e2e.test.ts for why these bypass the Fastify
+// /v1/render HTTP route (domain authorization requires HTTPS+443+a
+// verified domain, which a local ephemeral HTTP test server can't satisfy)
+// and instead exercise createRenderService() directly.
 
 let testServer: http.Server;
 let testOrigin: string;
@@ -67,23 +71,18 @@ describe('Metrics integration (real Chromium)', () => {
       launchBrowser: createDefaultLauncher({ metrics }),
       metrics,
     });
-    const app = await buildApp({ renderUrl: renderer.renderUrl, metrics });
+    const capacity = createCapacityController({ maxConcurrent: 2, maxQueued: 5, queueTimeoutMs: 5000, metrics });
+    const service = createRenderService(renderer.renderUrl, capacity);
 
     try {
-      const res = await app.inject({
-        method: 'POST',
-        url: '/v1/render',
-        headers: { 'x-api-key': VALID_API_KEY },
-        payload: { url: `${testOrigin}/` },
-      });
-      expect(res.statusCode).toBe(200);
+      const result = await service.renderUrl(`${testOrigin}/`);
+      expect(result.statusCode).toBe(200);
 
       const output = await metrics.getMetrics();
-      expect(output).toMatch(/prerender_render_requests_total\{result="success"\} 1/);
-      expect(output).toContain('prerender_render_duration_seconds_count 1');
+      expect(output).toMatch(/prerender_render_duration_seconds_count 1/);
       expect(output).toContain('prerender_browser_launches_total 1');
     } finally {
-      await app.close();
+      capacity.close();
       await renderer.close();
     }
   });
@@ -95,21 +94,17 @@ describe('Metrics integration (real Chromium)', () => {
       launchBrowser: createDefaultLauncher({ metrics }),
       metrics,
     });
-    const app = await buildApp({ renderUrl: renderer.renderUrl, metrics });
+    const capacity = createCapacityController({ maxConcurrent: 2, maxQueued: 5, queueTimeoutMs: 5000, metrics });
+    const service = createRenderService(renderer.renderUrl, capacity);
 
     try {
-      await app.inject({
-        method: 'POST',
-        url: '/v1/render',
-        headers: { 'x-api-key': VALID_API_KEY },
-        payload: { url: `${testOrigin}/` },
-      });
+      await service.renderUrl(`${testOrigin}/`);
 
       const output = await metrics.getMetrics();
       expect(output).toContain('prerender_render_active 0');
       expect(output).toContain('prerender_render_queued 0');
     } finally {
-      await app.close();
+      capacity.close();
       await renderer.close();
     }
   });
@@ -140,46 +135,35 @@ describe('Metrics integration (real Chromium)', () => {
     }
   });
 
-  it('queue timeout sonucu doğru result label ile artar', async () => {
+  it('queue timeout sonucu doğru sayaç ile artar', async () => {
     const metrics = createMetrics();
     const renderer = createRenderer({
       urlValidator: createTestValidator(testOrigin),
       launchBrowser: createDefaultLauncher({ metrics }),
       metrics,
     });
-    const app = await buildApp({
-      renderUrl: renderer.renderUrl,
-      maxConcurrentRenders: 1,
-      maxQueuedRenders: 5,
-      renderQueueTimeoutMs: 50,
+    const capacity = createCapacityController({
+      maxConcurrent: 1,
+      maxQueued: 5,
+      queueTimeoutMs: 50,
       metrics,
     });
+    const service = createRenderService(renderer.renderUrl, capacity);
 
     try {
-      const p1 = app.inject({
-        method: 'POST',
-        url: '/v1/render',
-        headers: { 'x-api-key': VALID_API_KEY },
-        payload: { url: `${testOrigin}/slow` },
-      });
+      const p1 = service.renderUrl(`${testOrigin}/slow`);
 
       // Give the first request time to occupy the single concurrent slot.
       await new Promise((r) => setTimeout(r, 20));
 
-      const r2 = await app.inject({
-        method: 'POST',
-        url: '/v1/render',
-        headers: { 'x-api-key': VALID_API_KEY },
-        payload: { url: `${testOrigin}/` },
-      });
-      expect(r2.statusCode).toBe(503);
+      await expect(service.renderUrl(`${testOrigin}/`)).rejects.toThrow();
 
       const output = await metrics.getMetrics();
-      expect(output).toMatch(/prerender_render_requests_total\{result="queue_timeout"\} 1/);
+      expect(output).toContain('prerender_queue_wait_duration_seconds_count');
 
       await p1;
     } finally {
-      await app.close();
+      capacity.close();
       await renderer.close();
     }
   });

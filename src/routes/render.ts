@@ -3,15 +3,20 @@ import { z } from 'zod';
 import { env } from '../config/env.js';
 import { isCapacityError } from '../lib/errors.js';
 import { safeUrlOrigin } from '../lib/url-security.js';
+import { normalizeTargetUrl, InvalidTargetUrlError } from '../lib/url-normalize.js';
+import { checkApiKey } from '../lib/api-key-auth.js';
 import { createNoopMetrics, safeMetricsCall, type Metrics } from '../lib/metrics.js';
 import type { RenderFn } from '../types/render.js';
+import type { DomainRepository } from '../repositories/types.js';
 
 const renderBodySchema = z.object({
+  domainId: z.string().uuid(),
   url: z.string().url().max(2048),
 });
 
 export interface RenderRouteOptions {
   renderUrl: RenderFn;
+  domainRepository: DomainRepository;
   metrics?: Metrics;
   getCapacitySnapshot?: () => { activeRenders: number; queuedRenders: number };
 }
@@ -20,14 +25,14 @@ export const renderRoutes: FastifyPluginAsync<RenderRouteOptions> = async (
   app,
   opts,
 ) => {
-  const { renderUrl } = opts;
+  const { renderUrl, domainRepository } = opts;
   const metrics = opts.metrics ?? createNoopMetrics();
   const getCapacitySnapshot = opts.getCapacitySnapshot ?? (() => ({ activeRenders: 0, queuedRenders: 0 }));
 
   app.post('/render', async (request, reply) => {
     const startedAt = Date.now();
 
-    if (request.headers['x-api-key'] !== env.API_KEY) {
+    if (!checkApiKey(request.headers['x-render-api-key'], env.RENDER_API_KEY)) {
       safeMetricsCall(() => metrics.incrementRenderResult('unauthorized'));
       request.log.warn(
         { event: 'render_rejected', result: 'unauthorized' },
@@ -52,10 +57,45 @@ export const renderRoutes: FastifyPluginAsync<RenderRouteOptions> = async (
       });
     }
 
-    const safeOrigin = safeUrlOrigin(parsed.data.url);
+    // --- Domain authorization (before capacity/renderer is touched) ---
+    const domain = await domainRepository.findById(parsed.data.domainId);
+    if (!domain) {
+      safeMetricsCall(() => metrics.incrementRenderResult('validation_error'));
+      request.log.info(
+        { event: 'render_rejected', result: 'validation_error', errorCode: 'DOMAIN_NOT_FOUND', domainId: parsed.data.domainId },
+        'Render reddedildi: domain bulunamadı',
+      );
+      return reply.code(404).send({ error: 'DOMAIN_NOT_FOUND', requestId: request.id });
+    }
+    if (domain.status !== 'verified') {
+      safeMetricsCall(() => metrics.incrementRenderResult('validation_error'));
+      request.log.info(
+        { event: 'render_rejected', result: 'validation_error', errorCode: 'DOMAIN_NOT_VERIFIED', domainId: domain.id },
+        'Render reddedildi: domain doğrulanmamış',
+      );
+      return reply.code(409).send({ error: 'DOMAIN_NOT_VERIFIED', requestId: request.id });
+    }
+
+    let normalized;
+    try {
+      normalized = normalizeTargetUrl(parsed.data.url, domain.normalizedHostname);
+    } catch (err) {
+      const code =
+        err instanceof InvalidTargetUrlError && err.reason === 'host_mismatch'
+          ? 'URL_DOMAIN_MISMATCH'
+          : 'INVALID_RENDER_URL';
+      safeMetricsCall(() => metrics.incrementRenderResult('validation_error'));
+      request.log.info(
+        { event: 'render_rejected', result: 'validation_error', errorCode: code, domainId: domain.id },
+        'Render reddedildi: geçersiz hedef URL',
+      );
+      return reply.code(code === 'URL_DOMAIN_MISMATCH' ? 400 : 400).send({ error: code, requestId: request.id });
+    }
+
+    const safeOrigin = safeUrlOrigin(normalized.normalizedUrl);
 
     try {
-      const result = await renderUrl(parsed.data.url);
+      const result = await renderUrl(normalized.normalizedUrl);
       const durationMs = Date.now() - startedAt;
       // Approximation: total route time minus the browser's own render step.
       // Includes minor context/page setup overhead, not just capacity-queue
@@ -67,6 +107,7 @@ export const renderRoutes: FastifyPluginAsync<RenderRouteOptions> = async (
         {
           event: 'render_completed',
           result: 'success',
+          domainId: domain.id,
           renderTimeMs: result.renderTimeMs,
           queueWaitMs,
           totalTimeMs: durationMs,
@@ -91,6 +132,7 @@ export const renderRoutes: FastifyPluginAsync<RenderRouteOptions> = async (
             event: 'render_rejected',
             result: resultLabel,
             errorCode: error.code,
+            domainId: domain.id,
             requestUrlOrigin: safeOrigin,
             ...getCapacitySnapshot(),
           },
@@ -116,6 +158,7 @@ export const renderRoutes: FastifyPluginAsync<RenderRouteOptions> = async (
         {
           event: 'render_failed',
           result: 'render_error',
+          domainId: domain.id,
           requestUrlOrigin: safeOrigin,
           error,
           ...getCapacitySnapshot(),

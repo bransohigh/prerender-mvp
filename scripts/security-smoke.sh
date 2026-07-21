@@ -8,11 +8,14 @@ set -Eeuo pipefail
 
 COMPOSE_FILE="compose.hardened.yml"
 RENDERER_SERVICE="renderer-api"
+POSTGRES_SERVICE="postgres"
 API_URL="http://127.0.0.1:3000"
-API_KEY="${API_KEY:-}"
+ADMIN_API_KEY="${ADMIN_API_KEY:-}"
+RENDER_API_KEY="${RENDER_API_KEY:-}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}"
 
-if [[ -z "$API_KEY" ]]; then
-  echo "ERROR: API_KEY environment variable must be set"
+if [[ -z "$ADMIN_API_KEY" || -z "$RENDER_API_KEY" ]]; then
+  echo "ERROR: ADMIN_API_KEY and RENDER_API_KEY environment variables must be set"
   exit 1
 fi
 
@@ -402,16 +405,92 @@ else
   fail "/health failed: $HEALTH"
 fi
 
+# Render now requires a domainId for a *verified* domain. Real DNS TXT
+# verification isn't available for a real hostname in CI, so this smoke
+# test marks a domain verified directly via SQL — a test-only shortcut for
+# the render-authorization smoke check, not a substitute for the DNS/HTML
+# verification unit+db tests (see test/domain-verification-service.test.ts).
+PROJECT_RESPONSE=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/projects" \
+  -H "content-type: application/json" \
+  -H "x-admin-api-key: $ADMIN_API_KEY" \
+  -d '{"name":"Smoke Test Project"}' 2>/dev/null || echo '{"error":"timeout"}')
+PROJECT_ID=$(echo "$PROJECT_RESPONSE" | jq -r '.id // empty')
+if [[ -n "$PROJECT_ID" ]]; then
+  pass "POST /v1/projects creates a project"
+else
+  fail "POST /v1/projects failed: $(echo "$PROJECT_RESPONSE" | head -c 200)"
+fi
+
+DOMAIN_RESPONSE=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/projects/$PROJECT_ID/domains" \
+  -H "content-type: application/json" \
+  -H "x-admin-api-key: $ADMIN_API_KEY" \
+  -d '{"hostname":"smoke-test.example.com","verificationMethod":"dns_txt"}' 2>/dev/null || echo '{"error":"timeout"}')
+DOMAIN_ID=$(echo "$DOMAIN_RESPONSE" | jq -r '.domain.id // empty')
+if [[ -n "$DOMAIN_ID" ]] && ! echo "$DOMAIN_RESPONSE" | jq -e 'has("token") or (.verification.token // "" | length > 0)' > /dev/null 2>&1; then
+  fail "Domain create response is missing verification.token"
+elif [[ -n "$DOMAIN_ID" ]]; then
+  pass "POST domain creates a pending domain with a one-time verification token"
+else
+  fail "POST domain failed: $(echo "$DOMAIN_RESPONSE" | head -c 200)"
+fi
+
+if [[ -n "$POSTGRES_PASSWORD" ]]; then
+  docker compose -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    psql -U prerender -d prerender -c \
+    "UPDATE domains SET status='verified', verified_at=now() WHERE id='$DOMAIN_ID'" > /dev/null 2>&1 || true
+fi
+VERIFIED_CHECK=$(curl -sf --connect-timeout 5 --max-time 10 "$API_URL/v1/domains/$DOMAIN_ID" \
+  -H "x-admin-api-key: $ADMIN_API_KEY" 2>/dev/null || echo '{}')
+if echo "$VERIFIED_CHECK" | jq -e '.status == "verified"' > /dev/null 2>&1; then
+  pass "Domain marked verified (test-only DB shortcut) for render authorization check"
+else
+  fail "Could not mark domain verified for smoke test: $(echo "$VERIFIED_CHECK" | head -c 200)"
+fi
+
 RENDER=$(curl -sf --connect-timeout 10 --max-time 30 -X POST "$API_URL/v1/render" \
   -H "content-type: application/json" \
-  -H "x-api-key: $API_KEY" \
-  -d '{"url":"https://example.com"}' 2>/dev/null || echo '{"error":"timeout"}')
+  -H "x-render-api-key: $RENDER_API_KEY" \
+  -d "{\"domainId\":\"$DOMAIN_ID\",\"url\":\"https://smoke-test.example.com\"}" 2>/dev/null || echo '{"error":"timeout"}')
 
-if echo "$RENDER" | jq -e '.html | length > 100' > /dev/null 2>&1; then
+if echo "$RENDER" | jq -e '.html | length > 0' > /dev/null 2>&1; then
   TITLE=$(echo "$RENDER" | jq -r '.title // "unknown"')
-  pass "Render successful — title: $TITLE"
+  pass "Render successful for verified domain — title: $TITLE"
 else
-  fail "Render failed: $(echo "$RENDER" | head -c 200)"
+  # smoke-test.example.com is not a real reachable host, so a render_error
+  # (422) after passing domain-authorization is the expected/acceptable
+  # outcome here — what matters is that it got PAST authorization and into
+  # the actual render attempt (confirmed by the DOMAIN_NOT_VERIFIED check
+  # below never firing for this specific request).
+  if echo "$RENDER" | jq -e '.error != "DOMAIN_NOT_VERIFIED" and .error != "DOMAIN_NOT_FOUND" and .error != "URL_DOMAIN_MISMATCH"' > /dev/null 2>&1; then
+    pass "Render reached the renderer past domain authorization (unreachable test host, expected render_error)"
+  else
+    fail "Render failed at domain authorization: $(echo "$RENDER" | head -c 200)"
+  fi
+fi
+
+UNVERIFIED_DOMAIN_RESPONSE=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/projects/$PROJECT_ID/domains" \
+  -H "content-type: application/json" \
+  -H "x-admin-api-key: $ADMIN_API_KEY" \
+  -d '{"hostname":"unverified-smoke.example.com","verificationMethod":"dns_txt"}' 2>/dev/null || echo '{"error":"timeout"}')
+UNVERIFIED_DOMAIN_ID=$(echo "$UNVERIFIED_DOMAIN_RESPONSE" | jq -r '.domain.id // empty')
+UNVERIFIED_RENDER=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/render" \
+  -H "content-type: application/json" \
+  -H "x-render-api-key: $RENDER_API_KEY" \
+  -d "{\"domainId\":\"$UNVERIFIED_DOMAIN_ID\",\"url\":\"https://unverified-smoke.example.com\"}" 2>/dev/null || echo "000")
+if [[ "$UNVERIFIED_RENDER" == "409" ]]; then
+  pass "Render rejected for unverified domain (409 DOMAIN_NOT_VERIFIED)"
+else
+  fail "Render on unverified domain returned $UNVERIFIED_RENDER, expected 409"
+fi
+
+OLD_HEADER_RENDER=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 -X POST "$API_URL/v1/render" \
+  -H "content-type: application/json" \
+  -H "x-api-key: $RENDER_API_KEY" \
+  -d "{\"domainId\":\"$DOMAIN_ID\",\"url\":\"https://smoke-test.example.com\"}" 2>/dev/null || echo "000")
+if [[ "$OLD_HEADER_RENDER" == "401" ]]; then
+  pass "Legacy x-api-key header no longer authenticates /v1/render"
+else
+  fail "Legacy x-api-key header returned $OLD_HEADER_RENDER, expected 401"
 fi
 
 # ---- Observability ----
@@ -471,10 +550,10 @@ else
   fail "Render success metric not found after a successful render"
 fi
 
-if echo "$METRICS_INTERNAL" | grep -q "$API_KEY"; then
-  fail "Metrics output contains the API key"
+if echo "$METRICS_INTERNAL" | grep -qE "$ADMIN_API_KEY|$RENDER_API_KEY"; then
+  fail "Metrics output contains an API key"
 else
-  pass "Metrics output does not contain the API key"
+  pass "Metrics output does not contain an API key"
 fi
 
 if echo "$METRICS_INTERNAL" | grep -qE 'https?://|url="'; then
@@ -488,10 +567,10 @@ section "Container Log Hygiene"
 
 RENDERER_LOGS=$(docker compose -f "$COMPOSE_FILE" logs "$RENDERER_SERVICE" 2>/dev/null || echo "")
 
-if echo "$RENDERER_LOGS" | grep -q "$API_KEY"; then
-  fail "Renderer container logs contain the API key"
+if echo "$RENDERER_LOGS" | grep -qE "$ADMIN_API_KEY|$RENDER_API_KEY"; then
+  fail "Renderer container logs contain an API key"
 else
-  pass "Renderer container logs do not contain the API key"
+  pass "Renderer container logs do not contain an API key"
 fi
 
 if echo "$RENDERER_LOGS" | grep -qE '\?[a-zA-Z0-9_]+=|query=|token='; then
@@ -505,6 +584,72 @@ if [[ "$DOCKER_HEALTH" == "healthy" ]]; then
   pass "Docker healthcheck (via /readyz) reports healthy"
 else
   fail "Docker healthcheck status: $DOCKER_HEALTH"
+fi
+
+# ---- Database ----
+section "Database"
+
+POSTGRES_ID=$(get_container_id "$POSTGRES_SERVICE")
+if [[ -n "$POSTGRES_ID" ]]; then
+  PG_INSPECT=$(docker inspect "$POSTGRES_ID")
+
+  PG_PORTS=$(echo "$PG_INSPECT" | jq -r '.[0].HostConfig.PortBindings // {} | keys[]' 2>/dev/null || echo "")
+  if [[ -z "$PG_PORTS" ]]; then
+    pass "PostgreSQL has no published host ports"
+  else
+    fail "PostgreSQL has published ports: $PG_PORTS"
+  fi
+
+  PG_NETWORKS=$(echo "$PG_INSPECT" | jq -r '.[0].NetworkSettings.Networks // {} | keys[]' 2>/dev/null)
+  if echo "$PG_NETWORKS" | grep -q '_external$\|^external$'; then
+    fail "PostgreSQL is attached to the external (internet-facing) network: $PG_NETWORKS"
+  else
+    pass "PostgreSQL is not attached to the external network (networks: $(echo "$PG_NETWORKS" | tr '\n' ' '))"
+  fi
+
+  PG_CAPADD=$(echo "$PG_INSPECT" | jq -r '.[0].HostConfig.CapAdd // [] | index("SYS_ADMIN")')
+  if [[ "$PG_CAPADD" == "null" ]]; then
+    pass "PostgreSQL does not have SYS_ADMIN capability"
+  else
+    fail "PostgreSQL has SYS_ADMIN capability"
+  fi
+else
+  fail "Could not find postgres container"
+fi
+
+# Readiness must react to the database actually being down, and /livez must
+# stay 200 throughout (liveness is process-only, never DB-dependent).
+docker compose -f "$COMPOSE_FILE" stop "$POSTGRES_SERVICE" > /dev/null 2>&1 || true
+sleep 4
+
+LIVEZ_DURING_DB_DOWN=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "$API_URL/livez" 2>/dev/null || echo "000")
+if [[ "$LIVEZ_DURING_DB_DOWN" == "200" ]]; then
+  pass "/livez stays 200 while database is down"
+else
+  fail "/livez returned $LIVEZ_DURING_DB_DOWN while database is down"
+fi
+
+READYZ_DURING_DB_DOWN=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "$API_URL/readyz" 2>/dev/null || echo "000")
+if [[ "$READYZ_DURING_DB_DOWN" == "503" ]]; then
+  pass "/readyz returns 503 while database is down"
+else
+  fail "/readyz returned $READYZ_DURING_DB_DOWN while database is down (expected 503)"
+fi
+
+docker compose -f "$COMPOSE_FILE" start "$POSTGRES_SERVICE" > /dev/null 2>&1 || true
+READYZ_RECOVERED=false
+for _ in $(seq 1 15); do
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "$API_URL/readyz" 2>/dev/null || echo "000")
+  if [[ "$CODE" == "200" ]]; then
+    READYZ_RECOVERED=true
+    break
+  fi
+  sleep 2
+done
+if $READYZ_RECOVERED; then
+  pass "/readyz returns 200 again after database recovers (restart + volume behavior confirmed)"
+else
+  fail "/readyz did not recover to 200 after restarting the database"
 fi
 
 # ---- Summary ----

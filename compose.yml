@@ -1,13 +1,37 @@
 # Development compose — no proxy, no sandbox enforcement
 services:
+  postgres:
+    image: postgres:16.6-bookworm
+    environment:
+      - POSTGRES_USER=prerender
+      - POSTGRES_PASSWORD=prerender-dev-only
+      - POSTGRES_DB=prerender_dev
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prerender -d prerender_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   renderer-api:
     build: .
     env_file:
       - path: .env
         required: false
+    environment:
+      - DATABASE_URL=postgres://prerender:prerender-dev-only@postgres:5432/prerender_dev
     ports:
       - "3000:3000"
     restart: unless-stopped
     shm_size: 1gb
     mem_limit: 2g
     cpus: 2
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-dev-data:
