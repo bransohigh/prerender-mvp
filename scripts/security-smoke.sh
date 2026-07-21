@@ -414,6 +414,99 @@ else
   fail "Render failed: $(echo "$RENDER" | head -c 200)"
 fi
 
+# ---- Observability ----
+section "Observability"
+
+LIVEZ=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "$API_URL/livez" 2>/dev/null || echo "000")
+if [[ "$LIVEZ" == "200" ]]; then
+  pass "/livez returns 200"
+else
+  fail "/livez returned $LIVEZ"
+fi
+
+READYZ=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "$API_URL/readyz" 2>/dev/null || echo "000")
+if [[ "$READYZ" == "200" ]]; then
+  pass "/readyz returns 200"
+else
+  fail "/readyz returned $READYZ"
+fi
+
+# NOTE on "public gateway blocks /metrics": this MVP has no separate public
+# gateway container (see docker/gateway/nginx.conf header comment) —
+# renderer-api is published only to 127.0.0.1, so it is not reachable from
+# the public internet by construction. The check below exercises the
+# actual boundary that exists today: the app-level private/loopback guard
+# in src/routes/metrics.ts. curl from this CI runner arrives as loopback,
+# so it is expected to be ALLOWED — this documents current behavior rather
+# than simulating public internet access, which this topology cannot do.
+METRICS_HTTP=$(curl -s -o /tmp/metrics-response.txt -w '%{http_code}' --connect-timeout 5 --max-time 10 "$API_URL/metrics" 2>/dev/null || echo "000")
+if [[ "$METRICS_HTTP" == "200" ]]; then
+  pass "/metrics reachable from host-published loopback port (127.0.0.1) — expected, no public gateway exists in this MVP"
+else
+  fail "/metrics unexpectedly returned $METRICS_HTTP from loopback"
+fi
+
+METRICS_CONTENT_TYPE=$(curl -s -D - -o /dev/null --connect-timeout 5 --max-time 10 "$API_URL/metrics" 2>/dev/null | grep -i '^content-type:' || echo "")
+if echo "$METRICS_CONTENT_TYPE" | grep -qi 'text/plain'; then
+  pass "/metrics returns Prometheus text content type"
+else
+  fail "/metrics content-type unexpected: $METRICS_CONTENT_TYPE"
+fi
+
+METRICS_INTERNAL=$(renderer_exec sh -c 'wget -qO- http://localhost:3000/metrics 2>/dev/null || curl -sf http://localhost:3000/metrics 2>/dev/null' || echo "")
+if echo "$METRICS_INTERNAL" | grep -q '^# HELP prerender_'; then
+  pass "/metrics reachable from inside the renderer container (internal network path)"
+else
+  fail "/metrics not reachable from inside the renderer container"
+fi
+
+if echo "$METRICS_INTERNAL" | grep -q 'prerender_render_requests_total{result="success"}'; then
+  SUCCESS_COUNT=$(echo "$METRICS_INTERNAL" | grep 'prerender_render_requests_total{result="success"}' | awk '{print $2}')
+  if [[ -n "$SUCCESS_COUNT" ]] && [[ "$SUCCESS_COUNT" != "0" ]]; then
+    pass "Render success metric increased after real render (count=$SUCCESS_COUNT)"
+  else
+    fail "Render success metric present but zero after a successful render"
+  fi
+else
+  fail "Render success metric not found after a successful render"
+fi
+
+if echo "$METRICS_INTERNAL" | grep -q "$API_KEY"; then
+  fail "Metrics output contains the API key"
+else
+  pass "Metrics output does not contain the API key"
+fi
+
+if echo "$METRICS_INTERNAL" | grep -qE 'https?://|url="'; then
+  fail "Metrics output contains a raw URL"
+else
+  pass "Metrics output does not contain a raw URL or query string"
+fi
+
+# ---- Container Log Hygiene ----
+section "Container Log Hygiene"
+
+RENDERER_LOGS=$(docker compose -f "$COMPOSE_FILE" logs "$RENDERER_SERVICE" 2>/dev/null || echo "")
+
+if echo "$RENDERER_LOGS" | grep -q "$API_KEY"; then
+  fail "Renderer container logs contain the API key"
+else
+  pass "Renderer container logs do not contain the API key"
+fi
+
+if echo "$RENDERER_LOGS" | grep -qE '\?[a-zA-Z0-9_]+=|query=|token='; then
+  fail "Renderer container logs may contain a query string"
+else
+  pass "Renderer container logs do not contain a query string"
+fi
+
+DOCKER_HEALTH=$(docker inspect "$(get_container_id "$RENDERER_SERVICE")" | jq -r '.[0].State.Health.Status // "none"' 2>/dev/null)
+if [[ "$DOCKER_HEALTH" == "healthy" ]]; then
+  pass "Docker healthcheck (via /readyz) reports healthy"
+else
+  fail "Docker healthcheck status: $DOCKER_HEALTH"
+fi
+
 # ---- Summary ----
 section "Summary"
 echo "  PASSED: $PASS"

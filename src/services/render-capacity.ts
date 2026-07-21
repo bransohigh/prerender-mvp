@@ -3,6 +3,7 @@ import {
   RenderQueueTimeoutError,
   RenderCapacityClosedError,
 } from '../lib/errors.js';
+import { createNoopMetrics, safeMetricsCall, type Metrics } from '../lib/metrics.js';
 
 export interface CapacitySnapshot {
   active: number;
@@ -16,6 +17,7 @@ export interface RenderCapacityOptions {
   maxConcurrent: number;
   maxQueued: number;
   queueTimeoutMs: number;
+  metrics?: Metrics;
 }
 
 interface QueueEntry<T> {
@@ -24,6 +26,7 @@ interface QueueEntry<T> {
   reject: (reason: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
   cancelled: boolean;
+  enqueuedAt: number;
 }
 
 export interface RenderCapacityController {
@@ -36,9 +39,21 @@ export function createCapacityController(
   options: RenderCapacityOptions,
 ): RenderCapacityController {
   const { maxConcurrent, maxQueued, queueTimeoutMs } = options;
+  const metrics = options.metrics ?? createNoopMetrics();
   let active = 0;
   let closed = false;
   const queue: QueueEntry<unknown>[] = [];
+
+  function reportSnapshot(): void {
+    safeMetricsCall(() =>
+      metrics.setCapacitySnapshot({
+        active,
+        queued: queue.length,
+        maxConcurrent,
+        maxQueued,
+      }),
+    );
+  }
 
   function tryRunNext(): void {
     while (active < maxConcurrent && queue.length > 0) {
@@ -47,10 +62,14 @@ export function createCapacityController(
       if (entry.cancelled) continue;
       executeEntry(entry);
     }
+    reportSnapshot();
   }
 
   function executeEntry<T>(entry: QueueEntry<T>): void {
     active++;
+    const waitSeconds = Math.max(0, Date.now() - entry.enqueuedAt) / 1000;
+    safeMetricsCall(() => metrics.observeQueueWait(waitSeconds));
+    reportSnapshot();
     let released = false;
 
     function releaseSlot(): void {
@@ -85,6 +104,7 @@ export function createCapacityController(
           reject,
           timer: setTimeout(() => {}, 0),
           cancelled: false,
+          enqueuedAt: Date.now(),
         };
         clearTimeout(entry.timer);
         executeEntry(entry);
@@ -96,10 +116,15 @@ export function createCapacityController(
     }
 
     return new Promise<T>((resolve, reject) => {
+      const enqueuedAt = Date.now();
       const timer = setTimeout(() => {
         entry.cancelled = true;
         const idx = queue.indexOf(entry as QueueEntry<unknown>);
         if (idx !== -1) queue.splice(idx, 1);
+        safeMetricsCall(() =>
+          metrics.observeQueueWait(Math.max(0, Date.now() - enqueuedAt) / 1000),
+        );
+        reportSnapshot();
         reject(new RenderQueueTimeoutError());
       }, queueTimeoutMs);
 
@@ -109,9 +134,11 @@ export function createCapacityController(
         reject,
         timer,
         cancelled: false,
+        enqueuedAt,
       };
 
       queue.push(entry as QueueEntry<unknown>);
+      reportSnapshot();
     });
   }
 
@@ -124,6 +151,7 @@ export function createCapacityController(
       entry.cancelled = true;
       entry.reject(new RenderCapacityClosedError());
     }
+    reportSnapshot();
   }
 
   function getSnapshot(): CapacitySnapshot {
@@ -135,6 +163,8 @@ export function createCapacityController(
       closed,
     };
   }
+
+  reportSnapshot();
 
   return { run, close, getSnapshot };
 }

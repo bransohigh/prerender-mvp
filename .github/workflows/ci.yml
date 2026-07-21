@@ -66,14 +66,14 @@ jobs:
       - name: Wait for healthy
         run: |
           for i in $(seq 1 30); do
-            if curl -sf --connect-timeout 2 --max-time 5 http://127.0.0.1:3000/health > /dev/null 2>&1; then
+            if curl -sf --connect-timeout 2 --max-time 5 http://127.0.0.1:3000/readyz > /dev/null 2>&1; then
               echo "Healthy after $((i * 2))s"
               exit 0
             fi
             if [ $((i % 5)) -eq 0 ]; then
               echo "--- Status at attempt $i ---"
               docker compose -f compose.hardened.yml ps
-              curl -v --connect-timeout 2 --max-time 5 http://127.0.0.1:3000/health 2>&1 || true
+              curl -v --connect-timeout 2 --max-time 5 http://127.0.0.1:3000/readyz 2>&1 || true
             fi
             sleep 2
           done

@@ -13,7 +13,8 @@ if (env.REQUIRE_OUTBOUND_PROXY && !env.OUTBOUND_PROXY_URL) {
 const app = await buildApp();
 
 const shutdown = async (signal: string) => {
-  app.log.info({ signal }, 'Sunucu kapatılıyor');
+  app.log.info({ event: 'shutdown_start', signal }, 'Sunucu kapatılıyor');
+  app.markShuttingDown();
   await app.close();
   await closeRenderer();
   process.exit(0);

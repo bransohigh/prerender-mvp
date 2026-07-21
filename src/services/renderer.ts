@@ -1,7 +1,8 @@
 import type { Browser, BrowserContext } from 'playwright';
 import { env } from '../config/env.js';
-import { assertSafePublicUrl } from '../lib/url-security.js';
+import { assertSafePublicUrl, UrlSecurityError } from '../lib/url-security.js';
 import { createDefaultLauncher } from '../lib/browser-launch.js';
+import { metrics as defaultMetrics, safeMetricsCall, type UrlRejectionReason } from '../lib/metrics.js';
 import type {
   RenderResult,
   RendererOptions,
@@ -13,23 +14,37 @@ export interface Renderer {
   close: () => Promise<void>;
 }
 
+function urlRejectionReason(err: unknown): UrlRejectionReason {
+  return err instanceof UrlSecurityError ? err.reason : 'unknown';
+}
+
 export function createRenderer(options?: RendererOptions): Renderer {
   const urlValidator: UrlValidator =
     options?.urlValidator ?? assertSafePublicUrl;
   const renderTimeoutMs = options?.renderTimeoutMs ?? env.RENDER_TIMEOUT_MS;
   const maxHtmlBytes = options?.maxHtmlBytes ?? env.MAX_HTML_BYTES;
+  const metrics = options?.metrics ?? defaultMetrics;
   const launchBrowser =
     options?.launchBrowser ??
     createDefaultLauncher({
       proxyUrl: env.OUTBOUND_PROXY_URL,
       sandbox: process.platform === 'linux',
       enforceSandboxOnLinux: true,
+      metrics,
     });
 
   let browserPromise: Promise<Browser> | null = null;
+  let closingIntentionally = false;
 
   function resetBrowserPromise(): void {
     browserPromise = null;
+  }
+
+  function handleDisconnected(): void {
+    resetBrowserPromise();
+    if (!closingIntentionally) {
+      safeMetricsCall(() => metrics.incrementBrowserDisconnect());
+    }
   }
 
   async function getBrowser(): Promise<Browser> {
@@ -43,6 +58,7 @@ export function createRenderer(options?: RendererOptions): Renderer {
       resetBrowserPromise();
     }
 
+    closingIntentionally = false;
     browserPromise = launchBrowser();
 
     const browser = await browserPromise.catch((err) => {
@@ -50,7 +66,7 @@ export function createRenderer(options?: RendererOptions): Renderer {
       throw err;
     });
 
-    browser.on('disconnected', resetBrowserPromise);
+    browser.on('disconnected', handleDisconnected);
     return browser;
   }
 
@@ -66,6 +82,7 @@ export function createRenderer(options?: RendererOptions): Renderer {
       try {
         await urlValidator(url);
       } catch {
+        safeMetricsCall(() => metrics.incrementUrlRejection('resource'));
         await route.abort('blockedbyclient');
         return;
       }
@@ -80,7 +97,14 @@ export function createRenderer(options?: RendererOptions): Renderer {
   }
 
   async function renderUrl(rawUrl: string): Promise<RenderResult> {
-    const safeUrl = await urlValidator(rawUrl);
+    let safeUrl: URL;
+    try {
+      safeUrl = await urlValidator(rawUrl);
+    } catch (err) {
+      safeMetricsCall(() => metrics.incrementUrlRejection(urlRejectionReason(err)));
+      throw err;
+    }
+
     const startedAt = Date.now();
     const browser = await getBrowser();
     const context = await browser.newContext({
@@ -113,7 +137,12 @@ export function createRenderer(options?: RendererOptions): Renderer {
         timeout: renderTimeoutMs,
       });
 
-      await urlValidator(page.url());
+      try {
+        await urlValidator(page.url());
+      } catch {
+        safeMetricsCall(() => metrics.incrementUrlRejection('redirect'));
+        throw new Error('Yönlendirme sonrası hedef güvenlik kontrolünü geçemedi');
+      }
 
       const html = await page.content();
       const htmlBytes = Buffer.byteLength(html, 'utf8');
@@ -121,7 +150,7 @@ export function createRenderer(options?: RendererOptions): Renderer {
         throw new Error(`HTML boyutu sınırı aşıldı: ${htmlBytes} byte`);
       }
 
-      return {
+      const result: RenderResult = {
         url: safeUrl.toString(),
         finalUrl: page.url(),
         statusCode: response?.status() ?? null,
@@ -130,6 +159,8 @@ export function createRenderer(options?: RendererOptions): Renderer {
         renderTimeMs: Date.now() - startedAt,
         renderedAt: new Date().toISOString(),
       };
+      safeMetricsCall(() => metrics.observeRenderDuration(result.renderTimeMs / 1000));
+      return result;
     } finally {
       await context.close();
     }
@@ -138,6 +169,7 @@ export function createRenderer(options?: RendererOptions): Renderer {
   async function close(): Promise<void> {
     if (!browserPromise) return;
     const promise = browserPromise;
+    closingIntentionally = true;
     resetBrowserPromise();
     try {
       const browser = await promise;

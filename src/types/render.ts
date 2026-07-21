@@ -17,4 +17,5 @@ export interface RendererOptions {
   renderTimeoutMs?: number;
   maxHtmlBytes?: number;
   launchBrowser?: () => Promise<import('playwright').Browser>;
+  metrics?: import('../lib/metrics.js').Metrics;
 }

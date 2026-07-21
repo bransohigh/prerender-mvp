@@ -1,4 +1,5 @@
 import { chromium, type Browser, type LaunchOptions } from 'playwright';
+import { createNoopMetrics, safeMetricsCall, type Metrics } from './metrics.js';
 
 export interface BrowserLaunchConfig {
   proxyUrl?: string;
@@ -10,6 +11,7 @@ export interface BrowserLaunchConfig {
   // hardened container's own isolation (seccomp, cap_drop ALL, etc.) does
   // not apply there anyway.
   enforceSandboxOnLinux?: boolean;
+  metrics?: Metrics;
 }
 
 export function buildLaunchOptions(config?: BrowserLaunchConfig): LaunchOptions {
@@ -61,5 +63,15 @@ export function createDefaultLauncher(
   if (config?.enforceSandboxOnLinux) {
     assertSandboxRequiredOnLinux(options);
   }
-  return () => chromium.launch(options);
+  const metrics = config?.metrics ?? createNoopMetrics();
+  return async () => {
+    try {
+      const browser = await chromium.launch(options);
+      safeMetricsCall(() => metrics.incrementBrowserLaunch());
+      return browser;
+    } catch (err) {
+      safeMetricsCall(() => metrics.incrementBrowserLaunchFailure());
+      throw err;
+    }
+  };
 }

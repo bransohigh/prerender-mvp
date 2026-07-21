@@ -17,8 +17,12 @@ npx playwright install chromium
 
 ```bash
 npm run dev
-curl http://localhost:3000/health
+curl http://localhost:3000/livez     # process ayakta mı
+curl http://localhost:3000/readyz    # render isteği kabul edebilir mi
+curl http://localhost:3000/health    # geriye dönük uyumluluk (deprecated, /livez ile aynı davranış)
 ```
+
+Ayrıntılar için bkz. [OBSERVABILITY.md](OBSERVABILITY.md).
 
 ## Render isteği
 
@@ -146,5 +150,9 @@ npm run test:integration  # Yalnızca integration testleri
 
 ### Test mimarisi
 
-- **Unit testleri** (`test/*.test.ts`): URL güvenlik, route/API, kapasite, browser launch testleri. DNS mock kullanır, Chromium başlatmaz.
-- **Integration testleri** (`test/integration/*.test.ts`): Gerçek Playwright Chromium ile render ve E2E testleri. Production SSRF kontrolünü kapatmak yerine özel test validator enjekte eder.
+- **Unit testleri** (`test/*.test.ts`): URL güvenlik, route/API, kapasite, browser launch, metrics testleri. DNS mock kullanır, Chromium başlatmaz.
+- **Integration testleri** (`test/integration/*.test.ts`): Gerçek Playwright Chromium ile render, E2E ve metrics testleri. Production SSRF kontrolünü kapatmak yerine özel test validator enjekte eder.
+
+## Observability
+
+Metrics, structured logging, `/livez` ve `/readyz` için bkz. [OBSERVABILITY.md](OBSERVABILITY.md).

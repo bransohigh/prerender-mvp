@@ -1,6 +1,16 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import ipaddr from 'ipaddr.js';
+import type { UrlRejectionReason } from './metrics.js';
+
+export class UrlSecurityError extends Error {
+  readonly reason: UrlRejectionReason;
+  constructor(reason: UrlRejectionReason, message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'UrlSecurityError';
+    this.reason = reason;
+  }
+}
 
 const blockedHostnames = new Set([
   'localhost',
@@ -68,7 +78,8 @@ export function assertAllowedPort(parsed: URL): void {
   if (parsed.protocol === 'http:' && portNum === 80) return;
   if (parsed.protocol === 'https:' && portNum === 443) return;
 
-  throw new Error(
+  throw new UrlSecurityError(
+    'port',
     'Yalnızca HTTP için 80 ve HTTPS için 443 portuna izin verilir',
   );
 }
@@ -85,12 +96,28 @@ export async function resolveDns(
         ? (err as NodeJS.ErrnoException).code
         : undefined;
     if (code === 'ENOTFOUND') {
-      throw new Error('Alan adı çözümlenemedi', { cause: err });
+      throw new UrlSecurityError('dns', 'Alan adı çözümlenemedi', { cause: err });
     }
     if (code === 'EAI_AGAIN' || code === 'ETIMEOUT' || code === 'TIMEOUT') {
-      throw new Error('DNS çözümleme zaman aşımına uğradı', { cause: err });
+      throw new UrlSecurityError('dns', 'DNS çözümleme zaman aşımına uğradı', {
+        cause: err,
+      });
     }
-    throw new Error('DNS çözümleme hatası', { cause: err });
+    throw new UrlSecurityError('dns', 'DNS çözümleme hatası', { cause: err });
+  }
+}
+
+// Safe-for-logging summary: protocol + hostname + normalized port only.
+// Never includes path, query string, fragment, or userinfo — those may
+// carry secrets or high-cardinality/PII data. Example: "https://example.com:443".
+export function safeUrlOrigin(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    const defaultPort = parsed.protocol === 'https:' ? '443' : '80';
+    const port = parsed.port || defaultPort;
+    return `${parsed.protocol}//${normalizeHostname(parsed.hostname)}:${port}`;
+  } catch {
+    return 'invalid';
   }
 }
 
@@ -99,31 +126,31 @@ export async function assertSafePublicUrl(rawUrl: string): Promise<URL> {
   try {
     parsed = new URL(rawUrl);
   } catch {
-    throw new Error('Geçersiz URL');
+    throw new UrlSecurityError('unknown', 'Geçersiz URL');
   }
 
   if (!['http:', 'https:'].includes(parsed.protocol)) {
-    throw new Error('Yalnızca HTTP ve HTTPS URL’leri kabul edilir');
+    throw new UrlSecurityError('protocol', 'Yalnızca HTTP ve HTTPS URL’leri kabul edilir');
   }
 
   if (parsed.username || parsed.password) {
-    throw new Error('Kimlik bilgisi içeren URL’ler kabul edilmez');
+    throw new UrlSecurityError('credentials', 'Kimlik bilgisi içeren URL’ler kabul edilmez');
   }
 
   assertAllowedPort(parsed);
 
   const hostname = normalizeHostname(parsed.hostname);
   if (isBlockedHostname(hostname)) {
-    throw new Error('Yerel veya metadata adresleri kabul edilmez');
+    throw new UrlSecurityError('hostname', 'Yerel veya metadata adresleri kabul edilmez');
   }
 
   const addresses = await resolveDns(hostname);
   if (addresses.length === 0) {
-    throw new Error('Alan adı çözümlenemedi');
+    throw new UrlSecurityError('dns', 'Alan adı çözümlenemedi');
   }
 
   if (addresses.some(({ address }) => isBlockedIp(address))) {
-    throw new Error('Özel veya ayrılmış IP adresleri kabul edilmez');
+    throw new UrlSecurityError('private_ip', 'Özel veya ayrılmış IP adresleri kabul edilmez');
   }
 
   return parsed;
