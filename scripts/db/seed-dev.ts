@@ -21,9 +21,21 @@ const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
 const db = drizzle(pool, { schema });
 
 try {
+  // Dev seed needs some organization to attach the project to — reuses one
+  // if `npm run auth:bootstrap-owner` already ran, otherwise creates a bare
+  // placeholder org (no user/membership; login still requires bootstrap).
+  const [existingOrg] = await db.select({ id: schema.organization.id }).from(schema.organization).limit(1);
+  const orgId = existingOrg?.id ?? 'org_local_dev_seed';
+  if (!existingOrg) {
+    await db
+      .insert(schema.organization)
+      .values({ id: orgId, name: 'Local Dev Org', slug: orgId, createdAt: new Date() })
+      .onConflictDoNothing({ target: schema.organization.id });
+  }
+
   const [project] = await db
     .insert(schema.projects)
-    .values({ name: 'Local Dev Project', slug: 'local-dev-project' })
+    .values({ name: 'Local Dev Project', slug: 'local-dev-project', organizationId: orgId })
     .onConflictDoNothing({ target: schema.projects.slug })
     .returning();
 

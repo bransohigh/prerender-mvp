@@ -22,7 +22,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/db/migrate.ts",
     "db:seed:dev": "tsx scripts/db/seed-dev.ts",
-    "auth:bootstrap-owner": "tsx scripts/auth/bootstrap-owner.ts"
+    "auth:bootstrap-owner": "tsx scripts/auth/bootstrap-owner.ts",
+    "tenancy:backfill-projects": "tsx scripts/tenancy/backfill-projects.ts"
   },
   "dependencies": {
     "@better-auth/api-key": "1.6.23",

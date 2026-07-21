@@ -309,10 +309,14 @@ export const auditEvents = pgTable('audit_events', {
 
 export const projects = pgTable('projects', {
   id: uuid('id').primaryKey().defaultRandom(),
-  // Nullable in this migration step for backward-compatible backfill (see
-  // scripts/db/backfill-organizations.ts and drizzle/0002_*). A later
-  // migration adds NOT NULL once no orphan rows remain.
-  organizationId: text('organization_id').references(() => organization.id, { onDelete: 'cascade' }),
+  // Migration history: added nullable in drizzle/0001 (expand phase), then
+  // scripts/tenancy/backfill-projects.ts assigns any orphan rows to an
+  // explicit organization, then drizzle/0002 adds this NOT NULL constraint
+  // (contract phase) — see TENANCY.md for the full procedure. The
+  // migration fails loudly if orphan rows still exist at apply time.
+  organizationId: text('organization_id')
+    .notNull()
+    .references(() => organization.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
   slug: text('slug').notNull(),
   status: projectStatusEnum('status').notNull().default('active'),

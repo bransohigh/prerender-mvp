@@ -24,7 +24,9 @@ export type AppErrorCode =
   | 'DATABASE_UNAVAILABLE'
   | 'UNAUTHENTICATED'
   | 'FORBIDDEN'
+  | 'FORBIDDEN_ROLE'
   | 'ORGANIZATION_NOT_FOUND'
+  | 'ENDPOINT_MIGRATED'
   | 'INVITATION_NOT_FOUND'
   | 'INVITATION_EXPIRED'
   | 'INVITATION_ALREADY_USED'
@@ -53,8 +55,10 @@ const STATUS_BY_CODE: Record<AppErrorCode, number> = {
   INVALID_RENDER_URL: 400,
   DATABASE_UNAVAILABLE: 503,
   UNAUTHENTICATED: 401,
-  FORBIDDEN: 404, // cross-tenant/insufficient-role access must not confirm resource existence
+  FORBIDDEN: 404, // cross-tenant access must not confirm resource existence
+  FORBIDDEN_ROLE: 403, // confirmed member, insufficient role
   ORGANIZATION_NOT_FOUND: 404,
+  ENDPOINT_MIGRATED: 410,
   INVITATION_NOT_FOUND: 404,
   INVITATION_EXPIRED: 410,
   INVITATION_ALREADY_USED: 410,

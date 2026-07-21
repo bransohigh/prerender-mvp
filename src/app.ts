@@ -199,7 +199,15 @@ export async function buildApp(options?: AppOptions) {
   }
 
   if (auth && authDb && invitationService) {
-    await app.register(organizationRoutes, { prefix: '/v1', auth, db: authDb, invitationService });
+    await app.register(organizationRoutes, {
+      prefix: '/v1',
+      auth,
+      db: authDb,
+      invitationService,
+      metrics,
+      proxyUrl: env.OUTBOUND_PROXY_URL,
+      trustedOrigins,
+    });
     await app.register(onboardingRoutes, { prefix: '/v1', auth, invitationService });
   }
 

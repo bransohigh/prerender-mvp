@@ -1,16 +1,18 @@
 import { describe, expect, it, beforeEach, afterAll } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { createTestDbClient, truncateAll } from './helpers.js';
+import { createTestDbClient, truncateAll, createFixtureOrganization } from './helpers.js';
 import { createPostgresProjectRepository } from '../../src/repositories/postgres/postgres-project-repository.js';
 import { createPostgresDomainRepository } from '../../src/repositories/postgres/postgres-domain-repository.js';
 import { hashVerificationToken, generateVerificationToken } from '../../src/lib/verification-token.js';
 import type { DbClient } from '../../src/db/client.js';
 
 let client: DbClient;
+let organizationId: string;
 
 beforeEach(async () => {
   client ??= createTestDbClient();
   await truncateAll(client);
+  organizationId = await createFixtureOrganization(client);
 });
 
 afterAll(async () => {
@@ -19,7 +21,7 @@ afterAll(async () => {
 
 async function makeProjectId(): Promise<string> {
   const repo = createPostgresProjectRepository(client.db);
-  const project = await repo.create({ name: 'P', slug: `p-${Date.now()}-${Math.random()}` });
+  const project = await repo.create({ name: 'P', slug: `p-${Date.now()}-${Math.random()}`, organizationId });
   return project.id;
 }
 

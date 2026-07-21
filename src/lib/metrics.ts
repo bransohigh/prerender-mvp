@@ -34,6 +34,9 @@ export interface CapacitySnapshotMetrics {
   maxQueued: number;
 }
 
+// Fixed, low-cardinality reasons only — never a user/org/project/domain id.
+export type AuthorizationDenialReason = 'unauthenticated' | 'not_member' | 'insufficient_role';
+
 export type DomainVerificationMethodLabel = 'dns_txt' | 'html_file';
 export type DomainVerificationResultLabel = 'success' | 'failure';
 
@@ -75,6 +78,7 @@ export interface Metrics {
     operation: DatabaseOperationLabel,
     result: DatabaseOperationResultLabel,
   ) => void;
+  incrementAuthorizationDenial: (reason: AuthorizationDenialReason) => void;
   getMetrics: () => Promise<string>;
   getContentType: () => string;
   reset: () => void;
@@ -235,6 +239,13 @@ export function createMetrics(options?: CreateMetricsOptions): Metrics {
     registers: [register],
   });
 
+  const authorizationDenialsTotal = new Counter({
+    name: `${prefix}authorization_denials_total`,
+    help: 'Total organization-scoped authorization denials by fixed reason (never a user/org/project id)',
+    labelNames: ['reason'] as const,
+    registers: [register],
+  });
+
   return {
     observeRenderDuration(seconds) {
       safe(() => renderDurationSeconds.observe(seconds));
@@ -283,6 +294,9 @@ export function createMetrics(options?: CreateMetricsOptions): Metrics {
     incrementDatabaseOperation(operation, result) {
       safe(() => databaseOperationsTotal.labels(operation, result).inc());
     },
+    incrementAuthorizationDenial(reason) {
+      safe(() => authorizationDenialsTotal.labels(reason).inc());
+    },
     async getMetrics() {
       try {
         return await register.metrics();
@@ -316,6 +330,7 @@ export function createNoopMetrics(): Metrics {
     observeSitemapFetchDuration() {},
     incrementSitemapUrlsDiscovered() {},
     incrementDatabaseOperation() {},
+    incrementAuthorizationDenial() {},
     async getMetrics() {
       return '';
     },

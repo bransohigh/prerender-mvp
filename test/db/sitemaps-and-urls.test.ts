@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterAll } from 'vitest';
-import { createTestDbClient, truncateAll } from './helpers.js';
+import { createTestDbClient, truncateAll, createFixtureOrganization } from './helpers.js';
 import { createPostgresProjectRepository } from '../../src/repositories/postgres/postgres-project-repository.js';
 import { createPostgresDomainRepository } from '../../src/repositories/postgres/postgres-domain-repository.js';
 import { createPostgresSitemapRepository } from '../../src/repositories/postgres/postgres-sitemap-repository.js';
@@ -8,10 +8,12 @@ import { hashVerificationToken, generateVerificationToken } from '../../src/lib/
 import type { DbClient } from '../../src/db/client.js';
 
 let client: DbClient;
+let organizationId: string;
 
 beforeEach(async () => {
   client ??= createTestDbClient();
   await truncateAll(client);
+  organizationId = await createFixtureOrganization(client);
 });
 
 afterAll(async () => {
@@ -20,7 +22,7 @@ afterAll(async () => {
 
 async function makeDomainId(): Promise<string> {
   const projectRepo = createPostgresProjectRepository(client.db);
-  const project = await projectRepo.create({ name: 'P', slug: `p-${Date.now()}-${Math.random()}` });
+  const project = await projectRepo.create({ name: 'P', slug: `p-${Date.now()}-${Math.random()}`, organizationId });
   const domainRepo = createPostgresDomainRepository(client.db);
   const domain = await domainRepo.create({
     projectId: project.id,

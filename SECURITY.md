@@ -171,9 +171,21 @@ Ayrıntılar için bkz. [DOMAIN_VERIFICATION.md](DOMAIN_VERIFICATION.md) ve
 - [ ] Seccomp profili hedef kernel ile test edildi
 - [ ] Domain re-verification (periyodik) politikası kuruldu
 
+## Tenant Isolation (Milestone 2)
+
+- Her yönetim endpoint'i üç katmanda organizasyon kapsamı zorunlu kılar: route (`requireOrganizationPermission`), service (org-scoped repository adapter), repository/SQL (JOIN'de `organization_id`). Unscoped bir lookup metodu tenant route'larından çağrılamaz — böyle bir metod yoktur.
+- Cross-tenant erişim: kaynak başka bir org'a aitse veya kullanıcı üye değilse → **404**, "üye değil" ile "kaynak yok" ayrımı response'ta yapılmaz. Üye ama rolü yetersizse → **403**.
+- Membership/role her request'te DB'den okunur — session cookie'de cache'lenmez; rol değişikliği veya üyelik kaldırma bir sonraki request'te etkili olur.
+- Davet token'ı: 256-bit rastgele, yalnızca oluşturma response'unda bir kez gösterilir, DB'de yalnızca SHA-256 hash saklanır, tek kullanımlık, 24 saat geçerli, iptal edilebilir. Owner rolü davetle asla verilemez.
+- CSRF (minimum, Milestone 2 kapsamı): organization-scoped route'larda her mutasyon (POST/PATCH/PUT/DELETE) `Origin` header'ının `AUTH_TRUSTED_ORIGINS` listesinde olmasını zorunlu kılar; eksik veya güvenilmeyen Origin → 404. CORS tek başına CSRF koruması olarak güvenilmez. `/v1/render` bu kontrole tabi değildir (cookie kullanmaz). Kapsamlı adversarial CSRF/CORS matrisi Milestone 3'e ertelendi.
+- Metrikler: `prerender_authorization_denials_total{reason}` — sabit değerler (`unauthenticated`/`not_member`/`insufficient_role`), asla user/org/project id içermez.
+
 ## Sonraki Adımlar
 
-- Kullanıcı authentication / multi-tenant sistemi
+- Proje bazlı render API key'leri (global `RENDER_API_KEY` kaldırılması)
+- Audit log
+- Auth-specific rate limiting (login, invitation, session)
+- Kapsamlı CSRF/CORS adversarial test matrisi
 - Periyodik domain re-verification
 - Container image vulnerability scanning
 - Kubernetes NetworkPolicy entegrasyonu

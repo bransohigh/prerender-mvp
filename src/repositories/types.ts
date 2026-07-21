@@ -7,6 +7,9 @@ export type DiscoveredUrlStatus = 'active' | 'excluded' | 'invalid';
 
 export interface Project {
   id: string;
+  // Optional on the type because the fake in-memory repository (unit route
+  // tests) doesn't track it — always present on rows from Postgres.
+  organizationId?: string;
   name: string;
   slug: string;
   status: ProjectStatus;
@@ -71,6 +74,14 @@ export interface PageResult<T> {
 export interface CreateProjectInput {
   name: string;
   slug: string;
+  // Optional here because the fake in-memory repository (used by unit
+  // route tests) and the legacy unscoped service don't need it. The real
+  // Postgres repository requires it (the DB column is NOT NULL) — see
+  // createPostgresProjectRepository, which throws if omitted. Real
+  // tenant-scoped creation goes through
+  // src/repositories/postgres/tenant-repository.ts's
+  // createProjectForOrganization instead, which always supplies it.
+  organizationId?: string;
 }
 
 export interface UpdateProjectInput {

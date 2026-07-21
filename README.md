@@ -320,3 +320,13 @@ npm run test:db           # Yalnızca database integration testleri (gerçek Pos
 ## Observability
 
 Metrics, structured logging, `/livez` ve `/readyz` için bkz. [OBSERVABILITY.md](OBSERVABILITY.md).
+
+## Authentication & Tenancy
+
+- Yönetim endpoint'leri (`/v1/organizations/...`) yalnızca Better Auth session cookie ile çalışır — `ADMIN_API_KEY` artık yönetim endpoint'lerine erişim sağlamaz.
+- Eski unscoped `/v1/projects`, `/v1/domains`, `/v1/sitemap-sources` endpoint'leri kalıcı olarak **410 Gone** döner (`ENDPOINT_MIGRATED`). Yeni organization-scoped karşılıkları için bkz. [TENANCY.md](TENANCY.md).
+- `/v1/render` şimdilik değişmedi — hâlâ geçiş dönemi `RENDER_API_KEY` ile çalışır (Milestone 3'te proje bazlı API key'lere taşınacak).
+- İlk kullanıcı/organizasyon: `npm run auth:bootstrap-owner -- --email=<email> --name=<name>` (şifre TTY üzerinden, argüman olarak asla).
+- Kullanıcı daveti (invite-only, açık kayıt yok): `POST /v1/organizations/:organizationId/invitations` → `POST /v1/onboarding/accept`.
+- Roller ve yetki matrisi, cross-tenant 404 davranışı, organizationId backfill prosedürü için bkz. [TENANCY.md](TENANCY.md).
+- Cookie güvenliği, CSRF, session tehdit modeli için bkz. [SECURITY.md](SECURITY.md).

@@ -1,22 +1,36 @@
 import { describe, expect, it, beforeEach, afterAll } from 'vitest';
-import { createTestDbClient, truncateAll } from './helpers.js';
+import { createTestDbClient, truncateAll, createFixtureOrganization } from './helpers.js';
 import { createPostgresProjectRepository } from '../../src/repositories/postgres/postgres-project-repository.js';
 import type { DbClient } from '../../src/db/client.js';
+import type { CreateProjectInput, ProjectRepository } from '../../src/repositories/types.js';
 
 let client: DbClient;
+let organizationId: string;
 
 beforeEach(async () => {
   client ??= createTestDbClient();
   await truncateAll(client);
+  organizationId = await createFixtureOrganization(client);
 });
 
 afterAll(async () => {
   await client?.close();
 });
 
+// Thin wrapper so every test call site doesn't need to repeat
+// organizationId — the underlying repository still requires it (DB
+// NOT NULL), this test file just isn't exercising multi-org behavior.
+function repoFor(client: DbClient, organizationId: string): ProjectRepository {
+  const real = createPostgresProjectRepository(client.db);
+  return {
+    ...real,
+    create: (input: CreateProjectInput) => real.create({ ...input, organizationId }),
+  };
+}
+
 describe('PostgresProjectRepository', () => {
   it('creates and reads back a project', async () => {
-    const repo = createPostgresProjectRepository(client.db);
+    const repo = repoFor(client, organizationId);
     const created = await repo.create({ name: 'Example', slug: 'example' });
     expect(created.id).toBeTruthy();
 
@@ -26,7 +40,7 @@ describe('PostgresProjectRepository', () => {
   });
 
   it('enforces the unique slug constraint', async () => {
-    const repo = createPostgresProjectRepository(client.db);
+    const repo = repoFor(client, organizationId);
     await repo.create({ name: 'A', slug: 'dup' });
     await expect(repo.create({ name: 'B', slug: 'dup' })).rejects.toMatchObject({
       code: 'PROJECT_SLUG_CONFLICT',
@@ -34,7 +48,7 @@ describe('PostgresProjectRepository', () => {
   });
 
   it('handles concurrent duplicate-slug creates without a race condition', async () => {
-    const repo = createPostgresProjectRepository(client.db);
+    const repo = repoFor(client, organizationId);
     const results = await Promise.allSettled([
       repo.create({ name: 'A', slug: 'concurrent' }),
       repo.create({ name: 'B', slug: 'concurrent' }),
@@ -46,7 +60,7 @@ describe('PostgresProjectRepository', () => {
   });
 
   it('soft-deletes: status becomes deleted, row still exists', async () => {
-    const repo = createPostgresProjectRepository(client.db);
+    const repo = repoFor(client, organizationId);
     const created = await repo.create({ name: 'A', slug: 'a' });
     await repo.softDeleteWithCascade(created.id);
 
@@ -55,7 +69,7 @@ describe('PostgresProjectRepository', () => {
   });
 
   it('findBySlug excludes deleted projects', async () => {
-    const repo = createPostgresProjectRepository(client.db);
+    const repo = repoFor(client, organizationId);
     const created = await repo.create({ name: 'A', slug: 'a' });
     await repo.softDeleteWithCascade(created.id);
 
@@ -64,7 +78,7 @@ describe('PostgresProjectRepository', () => {
   });
 
   it('list paginates via cursor', async () => {
-    const repo = createPostgresProjectRepository(client.db);
+    const repo = repoFor(client, organizationId);
     for (let i = 0; i < 5; i++) {
       await repo.create({ name: `P${i}`, slug: `p${i}` });
     }
@@ -78,7 +92,7 @@ describe('PostgresProjectRepository', () => {
   });
 
   it('update rejects a conflicting slug', async () => {
-    const repo = createPostgresProjectRepository(client.db);
+    const repo = repoFor(client, organizationId);
     await repo.create({ name: 'A', slug: 'a' });
     const b = await repo.create({ name: 'B', slug: 'b' });
     await expect(repo.update(b.id, { slug: 'a' })).rejects.toMatchObject({

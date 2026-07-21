@@ -32,8 +32,17 @@ function isUniqueViolation(err: unknown): boolean {
 export function createPostgresProjectRepository(db: Database): ProjectRepository {
   return {
     async create(input: CreateProjectInput): Promise<Project> {
+      if (!input.organizationId) {
+        throw new Error(
+          'createPostgresProjectRepository.create: organizationId is required (projects.organization_id is NOT NULL). ' +
+            'Use tenant-repository.createProjectForOrganization for tenant-scoped creation.',
+        );
+      }
       try {
-        const [row] = await db.insert(projects).values(input).returning();
+        const [row] = await db
+          .insert(projects)
+          .values({ name: input.name, slug: input.slug, organizationId: input.organizationId })
+          .returning();
         return row as Project;
       } catch (err) {
         if (isUniqueViolation(err)) {

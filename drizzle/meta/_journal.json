@@ -15,6 +15,13 @@
       "when": 1784641961678,
       "tag": "0001_add_better_auth_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784645705772,
+      "tag": "0002_projects_organization_id_not_null",
+      "breakpoints": true
     }
   ]
 }
