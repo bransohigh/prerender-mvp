@@ -312,11 +312,14 @@ export const projects = pgTable('projects', {
   // Migration history: added nullable in drizzle/0001 (expand phase), then
   // scripts/tenancy/backfill-projects.ts assigns any orphan rows to an
   // explicit organization, then drizzle/0002 adds this NOT NULL constraint
-  // (contract phase) — see TENANCY.md for the full procedure. The
-  // migration fails loudly if orphan rows still exist at apply time.
+  // (contract phase), then drizzle/0003 changes onDelete from cascade to
+  // restrict — see TENANCY.md for the full procedure. Organization
+  // deletion is intentionally unimplemented: deleting an organization with
+  // any projects must fail (FK violation), never silently cascade-delete
+  // tenant data.
   organizationId: text('organization_id')
     .notNull()
-    .references(() => organization.id, { onDelete: 'cascade' }),
+    .references(() => organization.id, { onDelete: 'restrict' }),
   name: text('name').notNull(),
   slug: text('slug').notNull(),
   status: projectStatusEnum('status').notNull().default('active'),

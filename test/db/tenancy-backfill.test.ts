@@ -140,17 +140,40 @@ describe('tenancy backfill + NOT NULL migration', () => {
     ).resolves.toBeDefined();
   });
 
-  it('deleting an organization cascades to its projects (documented, not silent)', async () => {
-    // organization -> projects FK is `onDelete: 'cascade'` by explicit
-    // design (src/db/schema.ts) — this test documents and pins that
-    // behavior rather than leaving it implicit.
+  it('deleting an organization with existing projects fails (ON DELETE RESTRICT, no silent data loss)', async () => {
+    // organization -> projects FK is `onDelete: 'restrict'` by explicit
+    // design (src/db/schema.ts, drizzle/0003) — organization deletion is
+    // not implemented; this pins that a project (and transitively its
+    // domains/sitemap data) can never be silently destroyed by deleting
+    // the parent organization.
     const organizationId = await createFixtureOrganization(client);
-    await client.db.insert(projects).values({ name: 'Cascade Me', slug: 'cascade-me', organizationId });
+    await client.db.insert(projects).values({ name: 'Restrict Me', slug: 'restrict-me', organizationId });
 
     const { organization } = await import('../../src/db/schema.js');
-    await client.db.delete(organization).where(eq(organization.id, organizationId));
+    await expect(client.db.delete(organization).where(eq(organization.id, organizationId))).rejects.toThrow();
 
     const remaining = await client.db.select().from(projects).where(eq(projects.organizationId, organizationId));
-    expect(remaining).toHaveLength(0);
+    expect(remaining).toHaveLength(1);
+  });
+
+  it('deleting an organization with no projects succeeds (nothing to restrict)', async () => {
+    const organizationId = await createFixtureOrganization(client);
+    const { organization } = await import('../../src/db/schema.js');
+    await expect(client.db.delete(organization).where(eq(organization.id, organizationId))).resolves.toBeDefined();
+  });
+
+  it('existing project data survives the ON DELETE RESTRICT migration unchanged', async () => {
+    const organizationId = await createFixtureOrganization(client);
+    const [row] = await client.db
+      .insert(projects)
+      .values({ name: 'Pre-existing', slug: 'pre-existing-restrict', organizationId })
+      .returning();
+
+    // Re-running the migration set (idempotent no-op on an already-migrated
+    // DB) must not touch existing rows.
+    const found = await client.db.select().from(projects).where(eq(projects.id, row!.id));
+    expect(found).toHaveLength(1);
+    expect(found[0]!.name).toBe('Pre-existing');
+    expect(found[0]!.organizationId).toBe(organizationId);
   });
 });

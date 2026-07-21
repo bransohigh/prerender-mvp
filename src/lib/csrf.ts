@@ -15,21 +15,39 @@ const MUTATING_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
 // The render API-key endpoint (POST /v1/render) is never cookie-authenticated
 // and must not be registered with this hook — see src/app.ts, where it's
 // only applied to the organizationRoutes plugin scope.
+// Origin must be an exact scheme+host(+port) match against the configured
+// allowlist — no path/query/fragment, matching the same strict shape
+// enforced at parse time by src/lib/trusted-origins.ts. A malformed Origin
+// (one that doesn't even parse, or that carries a path/query/fragment) is
+// rejected the same way as an untrusted one.
+function isWellFormedOrigin(origin: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (parsed.pathname !== '/' && parsed.pathname !== '') return false;
+  if (parsed.search || parsed.hash) return false;
+  if (parsed.username || parsed.password) return false;
+  return true;
+}
+
 export function createOriginCheckHook(trustedOrigins: ReadonlySet<string>) {
   return async function checkOrigin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     if (!MUTATING_METHODS.has(request.method)) {
       return;
     }
     const origin = request.headers['origin'];
-    if (typeof origin !== 'string' || origin.length === 0) {
-      // Browser mutation requests always send Origin; a missing Origin on
-      // a mutating cookie-authenticated request is treated as untrusted
-      // rather than assumed to be a legitimate server-to-server call.
-      throw new AppError('FORBIDDEN', 'Missing Origin header');
+    // Deliberately the same generic message/code for every rejection
+    // reason (missing, malformed, untrusted) — the response never reveals
+    // which trusted origins are configured. Sent directly (not thrown) so
+    // it doesn't depend on each route handler's own try/catch — a
+    // preHandler hook's thrown error would otherwise hit Fastify's default
+    // error formatter instead of the AppError JSON shape.
+    if (typeof origin !== 'string' || origin.length === 0 || !isWellFormedOrigin(origin) || !trustedOrigins.has(origin)) {
+      const err = new AppError('CSRF_ORIGIN_REJECTED', 'Origin check failed');
+      await reply.code(err.statusCode).send({ error: err.code, message: err.message, requestId: request.id });
     }
-    if (!trustedOrigins.has(origin)) {
-      throw new AppError('FORBIDDEN', 'Untrusted Origin');
-    }
-    void reply;
   };
 }

@@ -87,18 +87,42 @@ back-to-back against an empty table, so step 2 is a no-op (0 rows) and step
 first so there's an organization for any subsequently created project to
 attach to.
 
-Deleting an organization cascades to its projects (`ON DELETE CASCADE`) —
-by explicit design, not an accident; there is currently no "soft-delete an
-organization" path, only "delete an organization deletes its tenant data."
+`drizzle/0003_projects_organization_restrict_delete.sql` changes
+`projects.organization_id`'s foreign key from `ON DELETE CASCADE` to `ON
+DELETE RESTRICT`: deleting an organization that still has any projects
+**fails** (Postgres FK violation) rather than silently cascading away
+projects, and transitively, their domains/sitemap sources/discovered URLs.
+**Organization deletion itself is not implemented** — there is no route or
+service that deletes an organization; the FK behavior only defines what
+happens if something deletes the row directly (e.g. a future admin tool or
+manual operation), and it must never destroy tenant data as a side effect.
+
+## Member management (owner-only, conservative Milestone 2 policy)
+
+`PATCH /v1/organizations/:organizationId/members/:memberId` (`{"role": "admin"|"member"}`)
+and `DELETE /v1/organizations/:organizationId/members/:memberId` — both
+**owner-only** (admin cannot change roles or remove members this
+milestone). Owner membership itself can never be changed or removed by
+anyone, including that owner — this blanket rule also covers "the final
+owner can't be removed" and "an owner can't demote themselves" without
+needing separate self/last-owner special cases. Cross-tenant member ids →
+404. `:memberId` is the `member.id` row id, never a Better Auth user id
+directly.
+
+## Tenant-scoped sitemap source fetch
+
+`POST /v1/organizations/:organizationId/sitemap-sources/:sourceId/fetch`
+and `GET /v1/organizations/:organizationId/sitemap-sources/:sourceId`
+replace the old unscoped `POST /v1/sitemap-sources/:sourceId/fetch` (now
+410). Source lookup is organization-scoped in SQL
+(`getSitemapSourceForOrganization`, a JOIN through `domains -> projects`).
+Owner/admin may fetch; member may read (`GET`) but not fetch (`POST`).
+Reuses the existing `fetchAndParseSitemapSource` (gzip/XXE/redirect/size
+limits, proxy routing, off-domain URL rejection all unchanged).
 
 ## Not yet implemented (tracked for a later milestone)
 
 - Ownership transfer.
-- Member removal / role-change HTTP endpoints (the permission exists in the
-  matrix; no route calls it yet).
-- A tenant-scoped "fetch a specific sitemap source" endpoint (the old
-  unscoped `POST /v1/sitemap-sources/:sourceId/fetch` is 410; only
-  domain-level discovery is available under organization scope so far).
 - Project-scoped render API keys (Milestone 3) — render authorization still
   uses the transitional global `RENDER_API_KEY`.
 - Full CSRF/CORS adversarial test matrix (only the minimum Origin check is

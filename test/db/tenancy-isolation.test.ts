@@ -457,13 +457,15 @@ describe('tenant isolation (real Postgres, two organizations)', () => {
       expect(res.statusCode).toBe(201);
     });
 
-    it('a mutation from an untrusted Origin is rejected', async () => {
+    it('a mutation from an untrusted Origin is rejected with 403 CSRF_ORIGIN_REJECTED', async () => {
       const a = await createOrgFixture('csrf-untrusted');
       const res = await createProject(a.organizationId, a.ownerCookie, 'Untrusted Origin Project', 'https://evil.example.com');
-      expect(res.statusCode).toBe(404);
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe('CSRF_ORIGIN_REJECTED');
+      expect(JSON.stringify(res.json())).not.toContain(TRUSTED_ORIGIN);
     });
 
-    it('a mutation with a missing Origin is rejected', async () => {
+    it('a mutation with a missing Origin is rejected with 403 CSRF_ORIGIN_REJECTED', async () => {
       const a = await createOrgFixture('csrf-missing');
       const res = await app.inject({
         method: 'POST',
@@ -471,7 +473,15 @@ describe('tenant isolation (real Postgres, two organizations)', () => {
         headers: { cookie: a.ownerCookie },
         payload: { name: 'No Origin Project' },
       });
-      expect(res.statusCode).toBe(404);
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe('CSRF_ORIGIN_REJECTED');
+    });
+
+    it('a malformed Origin (with a path) is rejected with 403 CSRF_ORIGIN_REJECTED', async () => {
+      const a = await createOrgFixture('csrf-malformed');
+      const res = await createProject(a.organizationId, a.ownerCookie, 'Malformed Origin Project', `${TRUSTED_ORIGIN}/some/path`);
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe('CSRF_ORIGIN_REJECTED');
     });
 
     it('an authenticated GET remains usable without an Origin header', async () => {
@@ -491,6 +501,192 @@ describe('tenant isolation (real Postgres, two organizations)', () => {
       // organizationRoutes plugin scope) — rejection here comes from
       // render's own API-key auth, not FORBIDDEN/missing-origin.
       expect(res.statusCode).not.toBe(404);
+    });
+  });
+
+  describe('member management', () => {
+    async function memberIdByEmail(orgId: string, cookie: string, email: string): Promise<string> {
+      const res = await app.inject({ method: 'GET', url: `/v1/organizations/${orgId}/members`, headers: { cookie } });
+      const items = res.json().items as Array<{ id: string; email: string }>;
+      return items.find((m) => m.email === email)!.id;
+    }
+
+    it('only owner may change roles; admin and member are rejected', async () => {
+      const a = await createOrgFixture('memmgmt-role');
+      const memberId = await memberIdByEmail(a.organizationId, a.ownerCookie, a.memberEmail);
+
+      const asAdmin = await app.inject({
+        method: 'PATCH',
+        url: `/v1/organizations/${a.organizationId}/members/${memberId}`,
+        headers: { cookie: a.adminCookie, origin: TRUSTED_ORIGIN },
+        payload: { role: 'admin' },
+      });
+      expect(asAdmin.statusCode).toBe(403);
+
+      const asOwner = await app.inject({
+        method: 'PATCH',
+        url: `/v1/organizations/${a.organizationId}/members/${memberId}`,
+        headers: { cookie: a.ownerCookie, origin: TRUSTED_ORIGIN },
+        payload: { role: 'admin' },
+      });
+      expect(asOwner.statusCode).toBe(200);
+      expect(asOwner.json().role).toBe('admin');
+    });
+
+    it('only owner may remove members; admin and member are rejected', async () => {
+      const a = await createOrgFixture('memmgmt-remove');
+      const memberId = await memberIdByEmail(a.organizationId, a.ownerCookie, a.memberEmail);
+
+      const asMember = await app.inject({
+        method: 'DELETE',
+        url: `/v1/organizations/${a.organizationId}/members/${memberId}`,
+        headers: { cookie: a.memberCookie, origin: TRUSTED_ORIGIN },
+      });
+      expect(asMember.statusCode).toBe(403);
+
+      const asOwner = await app.inject({
+        method: 'DELETE',
+        url: `/v1/organizations/${a.organizationId}/members/${memberId}`,
+        headers: { cookie: a.ownerCookie, origin: TRUSTED_ORIGIN },
+      });
+      expect(asOwner.statusCode).toBe(200);
+
+      const listAfter = await app.inject({ method: 'GET', url: `/v1/organizations/${a.organizationId}/members`, headers: { cookie: a.ownerCookie } });
+      expect((listAfter.json().items as Array<{ email: string }>).map((m) => m.email)).not.toContain(a.memberEmail);
+    });
+
+    it('owner membership can never be changed or removed, including by that owner', async () => {
+      const a = await createOrgFixture('memmgmt-owner-protect');
+      const ownerId = await memberIdByEmail(a.organizationId, a.ownerCookie, a.ownerEmail);
+
+      const changeSelf = await app.inject({
+        method: 'PATCH',
+        url: `/v1/organizations/${a.organizationId}/members/${ownerId}`,
+        headers: { cookie: a.ownerCookie, origin: TRUSTED_ORIGIN },
+        payload: { role: 'admin' },
+      });
+      expect(changeSelf.statusCode).toBe(403);
+
+      const removeSelf = await app.inject({
+        method: 'DELETE',
+        url: `/v1/organizations/${a.organizationId}/members/${ownerId}`,
+        headers: { cookie: a.ownerCookie, origin: TRUSTED_ORIGIN },
+      });
+      expect(removeSelf.statusCode).toBe(403);
+
+      const membershipStillOwner = await app.inject({ method: 'GET', url: `/v1/organizations/${a.organizationId}/members`, headers: { cookie: a.ownerCookie } });
+      const ownerRow = (membershipStillOwner.json().items as Array<{ id: string; role: string }>).find((m) => m.id === ownerId);
+      expect(ownerRow?.role).toBe('owner');
+    });
+
+    it('cross-tenant member ids return 404', async () => {
+      const a = await createOrgFixture('memmgmt-cross-a');
+      const b = await createOrgFixture('memmgmt-cross-b');
+      const bMemberId = await memberIdByEmail(b.organizationId, b.ownerCookie, b.memberEmail);
+
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/v1/organizations/${a.organizationId}/members/${bMemberId}`,
+        headers: { cookie: a.ownerCookie, origin: TRUSTED_ORIGIN },
+        payload: { role: 'admin' },
+      });
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('removing a membership takes effect on the next request', async () => {
+      const a = await createOrgFixture('memmgmt-next-req');
+      const memberId = await memberIdByEmail(a.organizationId, a.ownerCookie, a.memberEmail);
+
+      await app.inject({
+        method: 'DELETE',
+        url: `/v1/organizations/${a.organizationId}/members/${memberId}`,
+        headers: { cookie: a.ownerCookie, origin: TRUSTED_ORIGIN },
+      });
+
+      const afterRemoval = await app.inject({ method: 'GET', url: `/v1/organizations/${a.organizationId}`, headers: { cookie: a.memberCookie } });
+      expect(afterRemoval.statusCode).toBe(404);
+    });
+
+    it('response never exposes Better Auth account/session data', async () => {
+      const a = await createOrgFixture('memmgmt-secret');
+      const res = await app.inject({ method: 'GET', url: `/v1/organizations/${a.organizationId}/members`, headers: { cookie: a.ownerCookie } });
+      const body = JSON.stringify(res.json());
+      expect(body).not.toMatch(/password|sessionToken|accessToken|refreshToken/i);
+    });
+  });
+
+  describe('sitemap source fetch', () => {
+    async function createSitemapSource(orgId: string, domainId: string, cookie: string) {
+      const { createTenantRepository } = await import('../../src/repositories/postgres/tenant-repository.js');
+      const tenant = createTenantRepository(dbClient.db);
+      void cookie;
+      return tenant.upsertSitemapSourceForOrganization(orgId, domainId, {
+        url: 'https://fetch-me.example.com/sitemap.xml',
+        normalizedUrl: 'https://fetch-me.example.com/sitemap.xml',
+        type: 'sitemap',
+      });
+    }
+
+    it('requires membership and owner/admin role to fetch; member can read but not fetch', async () => {
+      const a = await createOrgFixture('smfetch-role');
+      const project = (await createProject(a.organizationId, a.ownerCookie, 'P')).json();
+      const domain = (await createDomain(a.organizationId, project.id, a.ownerCookie, 'fetch-me.example.com')).json();
+      const source = await createSitemapSource(a.organizationId, domain.domain.id, a.ownerCookie);
+
+      const memberRead = await app.inject({
+        method: 'GET',
+        url: `/v1/organizations/${a.organizationId}/sitemap-sources/${source.id}`,
+        headers: { cookie: a.memberCookie },
+      });
+      expect(memberRead.statusCode).toBe(200);
+
+      const memberFetch = await app.inject({
+        method: 'POST',
+        url: `/v1/organizations/${a.organizationId}/sitemap-sources/${source.id}/fetch`,
+        headers: { cookie: a.memberCookie, origin: TRUSTED_ORIGIN },
+      });
+      expect(memberFetch.statusCode).toBe(403);
+
+      // Domain isn't verified, so owner/admin get a domain-state error, not
+      // a role error — confirms the role check passed before this point.
+      const ownerFetch = await app.inject({
+        method: 'POST',
+        url: `/v1/organizations/${a.organizationId}/sitemap-sources/${source.id}/fetch`,
+        headers: { cookie: a.ownerCookie, origin: TRUSTED_ORIGIN },
+      });
+      expect(ownerFetch.statusCode).toBe(409);
+      expect(ownerFetch.json().error).toBe('DOMAIN_NOT_VERIFIED');
+    });
+
+    it('cross-tenant sitemap source id returns 404', async () => {
+      const a = await createOrgFixture('smfetch-cross-a');
+      const b = await createOrgFixture('smfetch-cross-b');
+      const bProject = (await createProject(b.organizationId, b.ownerCookie, 'B Project')).json();
+      const bDomain = (await createDomain(b.organizationId, bProject.id, b.ownerCookie, 'cross-fetch.example.com')).json();
+      const bSource = await createSitemapSource(b.organizationId, bDomain.domain.id, b.ownerCookie);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/organizations/${a.organizationId}/sitemap-sources/${bSource.id}/fetch`,
+        headers: { cookie: a.ownerCookie, origin: TRUSTED_ORIGIN },
+      });
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('the old unscoped fetch endpoint remains 410', async () => {
+      const res = await app.inject({ method: 'POST', url: '/v1/sitemap-sources/00000000-0000-0000-0000-000000000000/fetch' });
+      expect(res.statusCode).toBe(410);
+    });
+
+    it('does not leak the raw sitemap URL in an error response', async () => {
+      const a = await createOrgFixture('smfetch-secret');
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/organizations/${a.organizationId}/sitemap-sources/00000000-0000-0000-0000-000000000000/fetch`,
+        headers: { cookie: a.ownerCookie, origin: TRUSTED_ORIGIN },
+      });
+      expect(res.statusCode).toBe(404);
+      expect(JSON.stringify(res.json())).not.toContain('fetch-me.example.com');
     });
   });
 });

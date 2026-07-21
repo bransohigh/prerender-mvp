@@ -41,6 +41,7 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 export interface MemberSummary {
+  id: string;
   userId: string;
   email: string;
   name: string;
@@ -364,6 +365,7 @@ export function createTenantRepository(db: Database) {
     async listMembersForOrganization(organizationId: string): Promise<MemberSummary[]> {
       const rows = await db
         .select({
+          id: memberTable.id,
           userId: memberTable.userId,
           role: memberTable.role,
           createdAt: memberTable.createdAt,
@@ -380,11 +382,74 @@ export function createTenantRepository(db: Database) {
     async getMembershipForOrganization(
       organizationId: string,
       userId: string,
-    ): Promise<{ role: string } | null> {
+    ): Promise<{ id: string; role: string } | null> {
       const row = await db.query.member.findFirst({
         where: and(eq(memberTable.organizationId, organizationId), eq(memberTable.userId, userId)),
       });
-      return row ? { role: row.role } : null;
+      return row ? { id: row.id, role: row.role } : null;
+    },
+
+    // memberId here is member.id (the row's own primary key), matching the
+    // :memberId route param — never the Better Auth user id directly, so a
+    // caller can't probe user existence across organizations.
+    async getMemberForOrganization(organizationId: string, memberId: string): Promise<MemberSummary | null> {
+      const rows = await db
+        .select({
+          id: memberTable.id,
+          userId: memberTable.userId,
+          role: memberTable.role,
+          createdAt: memberTable.createdAt,
+          email: userTable.email,
+          name: userTable.name,
+        })
+        .from(memberTable)
+        .innerJoin(userTable, eq(memberTable.userId, userTable.id))
+        .where(and(eq(memberTable.id, memberId), eq(memberTable.organizationId, organizationId)))
+        .limit(1);
+      return rows[0] ?? null;
+    },
+
+    async updateMemberRoleForOrganization(
+      organizationId: string,
+      memberId: string,
+      role: 'admin' | 'member',
+    ): Promise<MemberSummary | null> {
+      const existing = await db.query.member.findFirst({
+        where: and(eq(memberTable.id, memberId), eq(memberTable.organizationId, organizationId)),
+      });
+      if (!existing) return null;
+      await db.update(memberTable).set({ role }).where(eq(memberTable.id, memberId));
+      const rows = await db
+        .select({
+          id: memberTable.id,
+          userId: memberTable.userId,
+          role: memberTable.role,
+          createdAt: memberTable.createdAt,
+          email: userTable.email,
+          name: userTable.name,
+        })
+        .from(memberTable)
+        .innerJoin(userTable, eq(memberTable.userId, userTable.id))
+        .where(eq(memberTable.id, memberId))
+        .limit(1);
+      return rows[0] ?? null;
+    },
+
+    async removeMemberForOrganization(organizationId: string, memberId: string): Promise<'removed' | 'not_found'> {
+      const existing = await db.query.member.findFirst({
+        where: and(eq(memberTable.id, memberId), eq(memberTable.organizationId, organizationId)),
+      });
+      if (!existing) return 'not_found';
+      await db.delete(memberTable).where(eq(memberTable.id, memberId));
+      return 'removed';
+    },
+
+    async countOwnersForOrganization(organizationId: string): Promise<number> {
+      const rows = await db
+        .select({ id: memberTable.id })
+        .from(memberTable)
+        .where(and(eq(memberTable.organizationId, organizationId), eq(memberTable.role, 'owner')));
+      return rows.length;
     },
 
     async listInvitationsForOrganization(organizationId: string): Promise<InvitationSummary[]> {

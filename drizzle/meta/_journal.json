@@ -22,6 +22,13 @@
       "when": 1784645705772,
       "tag": "0002_projects_organization_id_not_null",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784647150580,
+      "tag": "0003_projects_organization_restrict_delete",
+      "breakpoints": true
     }
   ]
 }

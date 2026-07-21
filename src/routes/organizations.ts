@@ -21,6 +21,8 @@ import {
   createInFlightGuard,
 } from '../services/domain-verification-service.js';
 import { discoverSitemapSources, assertDomainVerifiedForSitemap } from '../services/sitemap-discovery-service.js';
+import { fetchAndParseSitemapSource } from '../services/sitemap-fetch-service.js';
+import { createPostgresDiscoveredUrlRepository } from '../repositories/postgres/postgres-discovered-url-repository.js';
 import { createOriginCheckHook } from '../lib/csrf.js';
 import { createNoopMetrics, type Metrics } from '../lib/metrics.js';
 
@@ -43,6 +45,10 @@ const updateProjectSchema = z.object({
 const createDomainSchema = z.object({
   hostname: z.string().min(1).max(253),
   verificationMethod: z.enum(['dns_txt', 'html_file']),
+});
+
+const updateMemberRoleSchema = z.object({
+  role: z.enum(['admin', 'member']),
 });
 
 const listQuerySchema = z.object({
@@ -369,6 +375,100 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
           return reply.code(409).send({ error: 'INVITATION_ALREADY_USED', requestId: request.id });
         }
         return reply.code(200).send({ status: 'cancelled' });
+      } catch (err) {
+        return sendAppError(err, reply, request.id);
+      }
+    },
+  );
+
+  // ---- members ----------------------------------------------------------
+  // Conservative Milestone-2 policy: only owner may change roles or remove
+  // members; owner membership itself can never be changed or removed by
+  // anyone (including that owner) — ownership transfer is unsupported.
+  app.patch<{ Params: { organizationId: string; memberId: string } }>(
+    '/organizations/:organizationId/members/:memberId',
+    async (request, reply) => {
+      try {
+        const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'member.role.change', metrics);
+        const parsed = updateMemberRoleSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: 'invalid_request', details: parsed.error.flatten(), requestId: request.id });
+        }
+        const target = await tenant.getMemberForOrganization(ctx.organizationId, request.params.memberId);
+        if (!target) throw new AppError('MEMBER_NOT_FOUND', 'Member not found');
+        if (target.role === 'owner') {
+          throw new AppError('FORBIDDEN_ROLE', 'Owner membership cannot be changed');
+        }
+        const updated = await tenant.updateMemberRoleForOrganization(ctx.organizationId, request.params.memberId, parsed.data.role);
+        if (!updated) throw new AppError('MEMBER_NOT_FOUND', 'Member not found');
+        return reply.send(updated);
+      } catch (err) {
+        return sendAppError(err, reply, request.id);
+      }
+    },
+  );
+
+  app.delete<{ Params: { organizationId: string; memberId: string } }>(
+    '/organizations/:organizationId/members/:memberId',
+    async (request, reply) => {
+      try {
+        const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'member.remove', metrics);
+        const target = await tenant.getMemberForOrganization(ctx.organizationId, request.params.memberId);
+        if (!target) throw new AppError('MEMBER_NOT_FOUND', 'Member not found');
+        if (target.role === 'owner') {
+          // Blanket protection: covers both "the final owner" and
+          // "an owner removing themselves" without needing to special-case
+          // actor-vs-target, since ownership transfer isn't supported yet.
+          throw new AppError('FORBIDDEN_ROLE', 'Owner membership cannot be removed');
+        }
+        const result = await tenant.removeMemberForOrganization(ctx.organizationId, request.params.memberId);
+        if (result === 'not_found') throw new AppError('MEMBER_NOT_FOUND', 'Member not found');
+        return reply.code(200).send({ status: 'removed' });
+      } catch (err) {
+        return sendAppError(err, reply, request.id);
+      }
+    },
+  );
+
+  // ---- sitemap sources ----------------------------------------------------
+  app.get<{ Params: { organizationId: string; sourceId: string } }>(
+    '/organizations/:organizationId/sitemap-sources/:sourceId',
+    async (request, reply) => {
+      try {
+        const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'sitemap.read', metrics);
+        const source = await tenant.getSitemapSourceForOrganization(ctx.organizationId, request.params.sourceId);
+        if (!source) throw new AppError('SITEMAP_SOURCE_NOT_FOUND', 'Sitemap source not found');
+        return reply.send({ id: source.id, domainId: source.domainId, url: source.url, type: source.type, status: source.status, discoveredUrlCount: source.discoveredUrlCount });
+      } catch (err) {
+        return sendAppError(err, reply, request.id);
+      }
+    },
+  );
+
+  app.post<{ Params: { organizationId: string; sourceId: string } }>(
+    '/organizations/:organizationId/sitemap-sources/:sourceId/fetch',
+    async (request, reply) => {
+      try {
+        const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'sitemap.fetch', metrics);
+        const source = await tenant.getSitemapSourceForOrganization(ctx.organizationId, request.params.sourceId);
+        if (!source) throw new AppError('SITEMAP_SOURCE_NOT_FOUND', 'Sitemap source not found');
+        const domain = await tenant.getDomainForOrganization(ctx.organizationId, source.domainId);
+        if (!domain) throw new AppError('DOMAIN_NOT_FOUND', 'Domain not found');
+        if (domain.status !== 'verified') {
+          throw new AppError('DOMAIN_NOT_VERIFIED', 'Domain must be verified before fetching sitemaps');
+        }
+
+        // domain.id was just confirmed to belong to this organization above
+        // — the underlying discovered-url writes are keyed by that already
+        // -verified domainId, so the plain (non-tenant) discovered-url
+        // repository is safe to use here without re-deriving scope.
+        const sitemapRepo = createOrgScopedSitemapRepository(tenant, ctx.organizationId);
+        const discoveredUrlRepo = createPostgresDiscoveredUrlRepository(db);
+        const outcome = await fetchAndParseSitemapSource(domain, source, sitemapRepo, discoveredUrlRepo, {
+          proxyUrl: options.proxyUrl,
+          metrics,
+        });
+        return reply.send({ sitemapSourceId: source.id, discoveredCount: outcome.discoveredCount });
       } catch (err) {
         return sendAppError(err, reply, request.id);
       }
