@@ -6,7 +6,6 @@ dist
 !.env.example
 coverage
 test
-scripts
 docs
 *.md
 !package.json
