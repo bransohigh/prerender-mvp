@@ -314,7 +314,7 @@ section "Proxy Public Internet Access"
 PUBLIC_HTTP_OK=false
 for attempt in 1 2 3; do
   if renderer_exec node -e "
-    fetch('http://httpbin.org/ip', { signal: AbortSignal.timeout(15000) })
+    fetch('http://example.com/', { signal: AbortSignal.timeout(15000) })
       .then(r => { if (r.ok) process.exit(0); else process.exit(1); })
       .catch(() => process.exit(1));
   " 2>/dev/null; then
@@ -332,7 +332,7 @@ fi
 PUBLIC_HTTPS_OK=false
 for attempt in 1 2 3; do
   if renderer_exec node -e "
-    fetch('https://httpbin.org/ip', { signal: AbortSignal.timeout(15000) })
+    fetch('https://example.com/', { signal: AbortSignal.timeout(15000) })
       .then(r => { if (r.ok) process.exit(0); else process.exit(1); })
       .catch(() => process.exit(1));
   " 2>/dev/null; then
