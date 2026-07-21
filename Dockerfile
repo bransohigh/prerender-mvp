@@ -7,6 +7,7 @@ RUN npm ci --ignore-scripts
 
 COPY tsconfig.json ./
 COPY src ./src
+COPY scripts ./scripts
 RUN npx tsc -p tsconfig.json
 
 # Remove dev dependencies
@@ -20,6 +21,9 @@ WORKDIR /app
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
+# Migration SQL files are read directly at runtime by drizzle-orm's
+# migrator (scripts/db/migrate.ts), not compiled — must ship alongside dist.
+COPY drizzle ./drizzle
 
 # Create writable directories for Chromium temp profiles
 RUN mkdir -p /tmp/chromium-profile /tmp/playwright && \
