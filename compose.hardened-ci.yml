@@ -19,16 +19,25 @@
 
 services:
   renderer-api:
-    # Replaces (does not add to) the base file's host port publish — the
-    # TLS gateway is the only way in from outside the Docker network now.
-    ports: []
+    # `!reset` (Compose Spec merge directive, requires Compose v2.24+) forces
+    # this to fully clear the base file's host port publish instead of the
+    # default merge-by-key behavior, which otherwise leaves the base file's
+    # 127.0.0.1:3000:3000 mapping in place even under an "empty" override —
+    # the TLS gateway must be the only way in from outside the Docker network.
+    ports: !reset []
     environment:
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set (min 32 chars)}
       - BETTER_AUTH_BASE_URL=https://localhost:3443
       - AUTH_TRUSTED_ORIGINS=https://localhost:3443
-      # Narrow trust: only the gateway's fixed address on the dedicated
-      # `gateway` network below may set X-Forwarded-*. See src/app.ts.
-      - TRUSTED_PROXY_CIDRS=172.28.0.10/32
+      # Narrow trust: the `gateway` network below has exactly two members
+      # (this service and the gateway container) — nothing else can ever
+      # originate traffic on it, so trusting the whole /24 here is
+      # equivalent in practice to trusting the gateway's specific address,
+      # without depending on Docker's container-IP assignment order (a
+      # single /32 pin was tried first and proved fragile — the observed
+      # peer address on this network was not always the one requested via
+      # ipv4_address). See src/app.ts.
+      - TRUSTED_PROXY_CIDRS=172.28.0.0/24
       - DATABASE_URL=postgres://prerender:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/prerender
       - HOST=0.0.0.0
       - PORT=3000

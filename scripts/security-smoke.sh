@@ -613,8 +613,21 @@ else
   fail "Revoked key returned $REVOKED_RENDER, expected 401"
 fi
 
-# 11. Logout, then confirm the logged-out session is rejected.
-curl -s -o /dev/null -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 -X POST "$API_URL/api/auth/sign-out" > /dev/null 2>&1 || true
+# 11. Logout, then confirm the logged-out session is rejected. Better
+# Auth's own origin-check middleware requires an Origin header on any
+# cookie-bearing mutating request (see node_modules/better-auth/dist/api/
+# middlewares/origin-check.mjs validateOrigin) — without it, sign-out is
+# itself rejected (403 MISSING_OR_NULL_ORIGIN) and the session is never
+# actually invalidated, which would silently pass a status-code-agnostic
+# check. Capture and assert the sign-out status too, not just the
+# follow-up request.
+SIGN_OUT_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 \
+  -X POST "$API_URL/api/auth/sign-out" -H "origin: $BETTER_AUTH_BASE_URL" 2>/dev/null || echo "000")
+if [[ "$SIGN_OUT_STATUS" == "200" ]]; then
+  pass "Sign-out request succeeds (200)"
+else
+  fail "Sign-out request returned $SIGN_OUT_STATUS, expected 200"
+fi
 LOGGED_OUT_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" --connect-timeout 5 --max-time 10 "$API_URL/v1/organizations" 2>/dev/null || echo "000")
 if [[ "$LOGGED_OUT_STATUS" == "401" ]]; then
   pass "Logged-out session is rejected on the next management request"
@@ -882,7 +895,15 @@ if [[ "$TLS_MODE" == "true" ]]; then
     fail "Authenticated HTTPS request failed: $(echo "$TLS_ORG_LIST" | head -c 200)"
   fi
 
-  curl -s -o /dev/null -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 -X POST "$API_URL/api/auth/sign-out" > /dev/null 2>&1 || true
+  # Better Auth requires an Origin header on cookie-bearing mutations (see
+  # the note above the main flow's sign-out call) — required here too.
+  TLS_SIGN_OUT_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 \
+    -X POST "$API_URL/api/auth/sign-out" -H "origin: $BETTER_AUTH_BASE_URL" 2>/dev/null || echo "000")
+  if [[ "$TLS_SIGN_OUT_STATUS" == "200" ]]; then
+    pass "HTTPS sign-out request succeeds (200)"
+  else
+    fail "HTTPS sign-out request returned $TLS_SIGN_OUT_STATUS, expected 200"
+  fi
   TLS_LOGGED_OUT_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 "$API_URL/v1/organizations" 2>/dev/null || echo "000")
   if [[ "$TLS_LOGGED_OUT_STATUS" == "401" ]]; then
     pass "Session cookie no longer authenticates after HTTPS logout"
