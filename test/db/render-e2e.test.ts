@@ -11,6 +11,7 @@ import { member as memberTable, domains, apikey as apikeyTable } from '../../src
 import { createRenderer } from '../../src/services/renderer.js';
 import type { Renderer } from '../../src/services/renderer.js';
 import type { UrlValidator } from '../../src/types/render.js';
+import { createDefaultLauncher } from '../../src/lib/browser-launch.js';
 
 // Real Postgres + real Chromium, through the actual POST /v1/render HTTP
 // route with a genuine project-scoped API key. The route's own domain
@@ -71,7 +72,18 @@ beforeAll(async () => {
   const address = testServer.address();
   if (!address || typeof address === 'string') throw new Error('failed to start test server');
   testOrigin = `http://127.0.0.1:${address.port}`;
-  renderer = createRenderer({ urlValidator: createFixtureRestrictedValidator(testOrigin) });
+  // launchBrowser: createDefaultLauncher() with no config — same as
+  // test/integration/e2e.test.ts — launches WITHOUT Playwright's Chromium
+  // sandbox. Production's real renderer (src/services/renderer.ts's own
+  // default launcher) always enforces the sandbox on Linux; this override
+  // exists only because bare (non-Docker) CI runners restrict unprivileged
+  // user namespaces via AppArmor and don't have the hardened container's
+  // custom profile loaded, matching the documented rationale in
+  // src/lib/browser-launch.ts's BrowserLaunchConfig.enforceSandboxOnLinux.
+  renderer = createRenderer({
+    urlValidator: createFixtureRestrictedValidator(testOrigin),
+    launchBrowser: createDefaultLauncher(),
+  });
 });
 
 afterAll(async () => {
