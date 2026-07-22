@@ -196,6 +196,18 @@ Ayrıntılar için bkz. [DOMAIN_VERIFICATION.md](DOMAIN_VERIFICATION.md) ve
 - Redaction: `x-render-api-key` header'ı ve body/query'de olası key/token alias alanları normal request logging'e ulaşmadan reddedilir.
 - Organization suspend: `organization.status` sütunu (`active`/`suspended`, uygulama seviyesi, Better Auth'un kendi şemasında yok) — mevcut organizasyonlar migration'da `active`'e backfill edilir, sütun NOT NULL.
 
+## CI/Hardened Smoke için TLS Gateway (Checkpoint 3B düzeltmesi)
+
+`renderer-api` `NODE_ENV=production` olarak kalır ve `AUTH_TRUSTED_ORIGINS` production'da yalnızca `https://` kabul eder (bkz. `src/lib/trusted-origins.ts`) — bu, gerçek bir dağıtımda TLS sonlandıran bir reverse proxy'nin var olacağı varsayımına dayanan, kasıtlı bir güvenlik varsayılanıdır. Bu MVP'nin `compose.hardened.yml` temel profilinde henüz bir TLS katmanı yok (bkz. "Sonraki Adımlar"), bu yüzden `docker-security` CI job'ı `NODE_ENV=development`'a düşürmek veya HTTPS zorunluluğuna bir HTTP istisnası eklemek yerine — ki ikisi de gerçek production davranışını zayıflatırdı — `compose.hardened-ci.yml` override'ı ile ayrı bir TLS-sonlandıran gateway (nginx, `docker/gateway/nginx-tls.conf`) ekler:
+
+- `smoke client --HTTPS--> gateway (127.0.0.1:3443) --HTTP (internal docker network)--> renderer-api`
+- Bu profilde `renderer-api` artık host'a hiçbir port yayınlamaz; dışarıdan tek giriş noktası gateway'dir.
+- `gateway`, yalnızca `renderer-api`'nin de üye olduğu ayrı, sabit subnet'li bir `gateway` docker network'ünde yaşar; `TRUSTED_PROXY_CIDRS=172.28.0.10/32` ile Fastify yalnızca bu tek adresten gelen `X-Forwarded-*` header'larına güvenir (bkz. `src/app.ts`, `src/config/env.ts`).
+- `/metrics` gateway seviyesinde sabit 404 döner — hiçbir zaman renderer-api'ye proxy edilmez.
+- Sertifika, her CI çalışmasında `docker/gateway/generate-ci-cert.sh` ile üretilen, 1 günlük, commit edilmeyen (`.gitignore`'da `ci-certs/`) bir yerel CA + sunucu sertifikasıdır; doğrulama her zaman `curl --cacert` ile yapılır — hiçbir yerde `-k`/`--insecure`/`rejectUnauthorized:false` kullanılmaz.
+- `scripts/security-smoke.sh`, `TLS_MODE=true` + `CACERT=...` + `API_URL=https://localhost:3443` ile çalıştırıldığında gerçek bir cookie-jar login/authenticated-request/logout akışını HTTPS üzerinden doğrular, session cookie'nin `Secure`/`HttpOnly`/`SameSite=Lax`/`Path=/`/no-`Domain` bayraklarını gerçek `Set-Cookie` header'ından okur (asla bir Secure cookie'yi elle bir HTTP header'ına kopyalamaz), ve `/metrics`'in gateway üzerinden 404 döndüğünü doğrular.
+- Base (TLS olmayan) `compose.hardened.yml` profili değişmedi — hâlâ yalnızca `127.0.0.1`'e yayınlanır ve gerçek TLS dağıtım katmanı henüz yok; bu gateway yalnızca CI/smoke'un production davranışını (HTTPS trusted origin + Secure cookie) dürüstçe test edebilmesi içindir.
+
 ## Sonraki Adımlar
 
 - Audit log

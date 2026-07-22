@@ -56,6 +56,24 @@ const envSchema = z
     LOGIN_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).max(3_600_000).default(60_000),
     INVITATION_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(1000).default(10),
     INVITATION_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).max(3_600_000).default(60_000),
+
+    // Comma-separated exact IP addresses or CIDR ranges. Empty (default)
+    // means Fastify's trustProxy stays false — X-Forwarded-* headers from
+    // any source are ignored and request.ip/protocol/hostname reflect the
+    // real TCP peer. Only set this to the specific address of a known,
+    // trusted internal TLS-terminating gateway (see docker/gateway/) —
+    // never a wildcard or a public-facing value, since a trusted entry
+    // lets that peer's X-Forwarded-For/Proto/Host be taken at face value.
+    TRUSTED_PROXY_CIDRS: z
+      .string()
+      .optional()
+      .default('')
+      .transform((raw) =>
+        raw
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0),
+      ),
   })
   .transform((raw) => ({
     ...raw,

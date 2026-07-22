@@ -1,0 +1,97 @@
+# TLS-gateway override for the hardened CI/smoke profile. Adds a dedicated
+# TLS-terminating gateway in front of renderer-api and removes renderer-api's
+# direct host port, so the CI docker-security job exercises the same
+# NODE_ENV=production + HTTPS-only-trusted-origins + Secure-cookie behavior
+# a real deployment would use — instead of relaxing that behavior to make a
+# plain-HTTP CI run pass.
+#
+# Usage (see .github/workflows/ci.yml and scripts/security-smoke.sh):
+#   bash docker/gateway/generate-ci-cert.sh ci-certs
+#   docker compose -f compose.hardened.yml -f compose.hardened-ci.yml up -d \
+#     renderer-api egress-proxy gateway
+#   curl --cacert ci-certs/ca.crt https://localhost:3443/readyz
+#
+# Topology:
+#   smoke client --HTTPS--> gateway (:3443 on 127.0.0.1) --HTTP--> renderer-api
+#   renderer-api no longer publishes a host port in this profile — it is
+#   reachable only from the `gateway` network (which only the gateway and
+#   renderer-api join) and from `internal`/`database` as in the base file.
+
+services:
+  renderer-api:
+    # Replaces (does not add to) the base file's host port publish — the
+    # TLS gateway is the only way in from outside the Docker network now.
+    ports: []
+    environment:
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set (min 32 chars)}
+      - BETTER_AUTH_BASE_URL=https://localhost:3443
+      - AUTH_TRUSTED_ORIGINS=https://localhost:3443
+      # Narrow trust: only the gateway's fixed address on the dedicated
+      # `gateway` network below may set X-Forwarded-*. See src/app.ts.
+      - TRUSTED_PROXY_CIDRS=172.28.0.10/32
+      - DATABASE_URL=postgres://prerender:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/prerender
+      - HOST=0.0.0.0
+      - PORT=3000
+      - LOG_LEVEL=info
+      - RENDER_TIMEOUT_MS=15000
+      - MAX_HTML_BYTES=5000000
+      - MAX_CONCURRENT_RENDERS=2
+      - MAX_QUEUED_RENDERS=20
+      - RENDER_QUEUE_TIMEOUT_MS=10000
+      - OUTBOUND_PROXY_URL=http://egress-proxy:3128
+      - REQUIRE_OUTBOUND_PROXY=true
+    networks:
+      - internal
+      - database
+      - gateway
+
+  gateway:
+    image: nginx:1.27-alpine
+    ports:
+      - "127.0.0.1:3443:443"
+    volumes:
+      - ./docker/gateway/nginx-tls.conf:/etc/nginx/nginx.conf:ro
+      - ${CI_CERT_DIR:-./ci-certs}:/etc/nginx/certs:ro
+    networks:
+      gateway:
+        ipv4_address: 172.28.0.10
+    depends_on:
+      - renderer-api
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - SETUID
+      - SETGID
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /var/cache/nginx:size=32m
+      - /var/run:size=8m
+      - /tmp:size=32m
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 50
+    stop_grace_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-qO-", "https://127.0.0.1:443/readyz"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+networks:
+  # Dedicated to gateway<->renderer-api only — egress-proxy and postgres are
+  # not members, so this network has no reachability to either.
+  gateway:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

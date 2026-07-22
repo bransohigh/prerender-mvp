@@ -159,7 +159,11 @@ export async function buildApp(options?: AppOptions) {
       },
     },
     bodyLimit: 32 * 1024,
-    trustProxy: false,
+    // Only trusts X-Forwarded-* when TRUSTED_PROXY_CIDRS names a specific
+    // internal gateway (see docker/gateway/nginx-tls.conf +
+    // compose.hardened-ci.yml) — never a blanket true/wildcard, so an
+    // arbitrary caller can't spoof its own forwarded headers.
+    trustProxy: env.TRUSTED_PROXY_CIDRS.length > 0 ? env.TRUSTED_PROXY_CIDRS : false,
     requestIdHeader: false,
     genReqId: (request) => {
       const clientId = request.headers['x-request-id'];
