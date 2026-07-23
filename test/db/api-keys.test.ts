@@ -334,7 +334,7 @@ describe('project-scoped render API keys', () => {
       const tenant = createTenantRepository(dbClient.db);
       const apiKeyRepo = createApiKeyRepository(dbClient.db);
       const service = createApiKeyService(tenant, apiKeyRepo);
-      await expect(service.rotateKey(a.organizationId, project.id, created.id, 'someone')).rejects.toThrow();
+      await expect(service.rotateKey(a.organizationId, project.id, created.id, 'someone', null)).rejects.toThrow();
     } finally {
       vi.mocked(nodeCrypto.randomUUID).mockClear();
     }

@@ -354,6 +354,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
         email: parsed.data.email,
         role: parsed.data.role,
         invitedByUserId: ctx.userId,
+        requestId: request.id,
       });
 
       return reply.code(201).send({ id: result.id, token: result.token, expiresAt: result.expiresAt.toISOString() });
@@ -378,7 +379,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
     async (request, reply) => {
       try {
         const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'invitation.cancel', metrics);
-        const result = await tenant.cancelInvitationForOrganization(ctx.organizationId, request.params.invitationId);
+        const result = await tenant.cancelInvitationForOrganization(ctx.organizationId, request.params.invitationId, ctx.userId, request.id);
         if (result === 'not_found') throw new AppError('INVITATION_NOT_FOUND', 'Invitation not found');
         if (result === 'already_used') {
           return reply.code(409).send({ error: 'INVITATION_ALREADY_USED', requestId: request.id });
@@ -408,7 +409,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
         if (target.role === 'owner') {
           throw new AppError('FORBIDDEN_ROLE', 'Owner membership cannot be changed');
         }
-        const updated = await tenant.updateMemberRoleForOrganization(ctx.organizationId, request.params.memberId, parsed.data.role);
+        const updated = await tenant.updateMemberRoleForOrganization(ctx.organizationId, request.params.memberId, parsed.data.role, ctx.userId, request.id);
         if (!updated) throw new AppError('MEMBER_NOT_FOUND', 'Member not found');
         return reply.send(updated);
       } catch (err) {
@@ -430,7 +431,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
           // actor-vs-target, since ownership transfer isn't supported yet.
           throw new AppError('FORBIDDEN_ROLE', 'Owner membership cannot be removed');
         }
-        const result = await tenant.removeMemberForOrganization(ctx.organizationId, request.params.memberId);
+        const result = await tenant.removeMemberForOrganization(ctx.organizationId, request.params.memberId, ctx.userId, request.id);
         if (result === 'not_found') throw new AppError('MEMBER_NOT_FOUND', 'Member not found');
         return reply.code(200).send({ status: 'removed' });
       } catch (err) {
@@ -500,6 +501,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
           name: parsed.data.name,
           expiresInDays: parsed.data.expiresInDays,
           createdByUserId: ctx.userId,
+          requestId: request.id,
         });
         return reply.code(201).send(result);
       } catch (err) {
@@ -526,7 +528,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
     async (request, reply) => {
       try {
         const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'api_key.revoke', metrics);
-        const result = await apiKeyService.revokeKey(ctx.organizationId, request.params.projectId, request.params.keyId);
+        const result = await apiKeyService.revokeKey(ctx.organizationId, request.params.projectId, request.params.keyId, ctx.userId, request.id);
         if (result === 'not_found') throw new AppError('API_KEY_NOT_FOUND', 'API key not found');
         if (result === 'already_revoked') {
           return reply.code(409).send({ error: 'API_KEY_REVOKED', requestId: request.id });
@@ -543,7 +545,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
     async (request, reply) => {
       try {
         const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'api_key.rotate', metrics);
-        const result = await apiKeyService.rotateKey(ctx.organizationId, request.params.projectId, request.params.keyId, ctx.userId);
+        const result = await apiKeyService.rotateKey(ctx.organizationId, request.params.projectId, request.params.keyId, ctx.userId, request.id);
         if (result === 'not_found') throw new AppError('API_KEY_NOT_FOUND', 'API key not found');
         if (result === 'already_revoked' || result === 'already_rotated') {
           return reply.code(409).send({ error: 'API_KEY_REVOKED', requestId: request.id });

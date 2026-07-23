@@ -4,6 +4,8 @@ import { AppError } from '../lib/app-error.js';
 import { invitations, organization, member } from '../db/schema.js';
 import type { Database } from '../db/client.js';
 import type { Auth } from '../auth/auth.js';
+import { insertAuditEventRow } from '../repositories/postgres/audit-repository.js';
+import { buildAuditMetadata } from '../lib/audit-events.js';
 
 const INVITATION_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -30,6 +32,7 @@ export interface CreateInvitationInput {
   email: string;
   role: 'admin' | 'member';
   invitedByUserId: string;
+  requestId: string | null;
 }
 
 export interface CreateInvitationResult {
@@ -51,20 +54,41 @@ export function createInvitationService(db: Database) {
     const tokenHash = hashInvitationToken(token);
     const expiresAt = new Date(Date.now() + INVITATION_TTL_MS);
 
-    const [row] = await db
-      .insert(invitations)
-      .values({
-        organizationId: input.organizationId,
-        email: input.email.trim().toLowerCase(),
-        role: input.role,
-        tokenHash,
-        status: 'pending',
-        invitedByUserId: input.invitedByUserId,
-        expiresAt,
-      })
-      .returning({ id: invitations.id });
+    const rowId = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .insert(invitations)
+        .values({
+          organizationId: input.organizationId,
+          email: input.email.trim().toLowerCase(),
+          role: input.role,
+          tokenHash,
+          status: 'pending',
+          invitedByUserId: input.invitedByUserId,
+          expiresAt,
+        })
+        .returning({ id: invitations.id });
 
-    return { id: row!.id, token, expiresAt };
+      await insertAuditEventRow(tx, {
+        organizationId: input.organizationId,
+        actorUserId: input.invitedByUserId,
+        actorApiKeyId: null,
+        action: 'organization.invitation.created',
+        targetType: 'invitation',
+        targetId: row!.id,
+        result: 'success',
+        errorCode: null,
+        requestId: input.requestId,
+        // The invited email is never audit metadata (not on the allowlist)
+        // — it would let anyone with audit-read access enumerate invited
+        // addresses beyond what the invitation-list endpoint already shows
+        // to owner/admin. roleAfter records what was granted.
+        metadata: buildAuditMetadata({ roleAfter: input.role }),
+      });
+
+      return row!.id;
+    });
+
+    return { id: rowId, token, expiresAt };
   }
 
   interface AcceptInvitationInput {
@@ -72,6 +96,7 @@ export function createInvitationService(db: Database) {
     name: string;
     password: string;
     auth: Auth;
+    requestId: string | null;
   }
 
   async function acceptInvitation(input: AcceptInvitationInput): Promise<{ userId: string; organizationId: string }> {
@@ -141,6 +166,19 @@ export function createInvitationService(db: Database) {
         .update(invitations)
         .set({ status: 'accepted', acceptedAt: new Date(), acceptedByUserId: userId })
         .where(eq(invitations.id, fresh.id));
+
+      await insertAuditEventRow(tx, {
+        organizationId: fresh.organizationId,
+        actorUserId: userId,
+        actorApiKeyId: null,
+        action: 'organization.invitation.accepted',
+        targetType: 'invitation',
+        targetId: fresh.id,
+        result: 'success',
+        errorCode: null,
+        requestId: input.requestId,
+        metadata: buildAuditMetadata({ roleAfter: fresh.role }),
+      });
 
       return { userId, organizationId: fresh.organizationId };
     });

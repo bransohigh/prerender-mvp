@@ -180,8 +180,8 @@ describe('tenant repository isolation, per resource type', () => {
       const { createInvitationService } = await import('../../src/services/invitation-service.js');
       const invitationService = createInvitationService(client.db);
 
-      const inviteA = await invitationService.createInvitation({ organizationId: a.organizationId, email: 'x@a.example.com', role: 'member', invitedByUserId: a.ownerUserId });
-      const inviteB = await invitationService.createInvitation({ organizationId: b.organizationId, email: 'x@b.example.com', role: 'member', invitedByUserId: b.ownerUserId });
+      const inviteA = await invitationService.createInvitation({ organizationId: a.organizationId, email: 'x@a.example.com', role: 'member', invitedByUserId: a.ownerUserId, requestId: null });
+      const inviteB = await invitationService.createInvitation({ organizationId: b.organizationId, email: 'x@b.example.com', role: 'member', invitedByUserId: b.ownerUserId, requestId: null });
 
       expect((await tenant.getInvitationForOrganization(a.organizationId, inviteA.id))?.id).toBe(inviteA.id);
       expect(await tenant.getInvitationForOrganization(a.organizationId, inviteB.id)).toBeUndefined();
@@ -189,7 +189,7 @@ describe('tenant repository isolation, per resource type', () => {
       const listA = await tenant.listInvitationsForOrganization(a.organizationId);
       expect(listA.map((i) => i.id)).toEqual([inviteA.id]);
 
-      const cancelResult = await tenant.cancelInvitationForOrganization(a.organizationId, inviteB.id);
+      const cancelResult = await tenant.cancelInvitationForOrganization(a.organizationId, inviteB.id, a.ownerUserId, null);
       expect(cancelResult).toBe('not_found');
       const bInviteAfter = await tenant.getInvitationForOrganization(b.organizationId, inviteB.id);
       expect(bInviteAfter?.status).toBe('pending');
@@ -227,12 +227,12 @@ describe('tenant repository isolation, per resource type', () => {
       });
       const bPlainMembership = await tenant.getMembershipForOrganization(b.organizationId, bMemberSignUp.user.id);
 
-      const roleChangeResult = await tenant.updateMemberRoleForOrganization(a.organizationId, bPlainMembership!.id, 'admin');
+      const roleChangeResult = await tenant.updateMemberRoleForOrganization(a.organizationId, bPlainMembership!.id, 'admin', a.ownerUserId, null);
       expect(roleChangeResult).toBeNull();
       const bPlainAfter = await tenant.getMemberForOrganization(b.organizationId, bPlainMembership!.id);
       expect(bPlainAfter?.role).toBe('member');
 
-      const removeResult = await tenant.removeMemberForOrganization(a.organizationId, bPlainMembership!.id);
+      const removeResult = await tenant.removeMemberForOrganization(a.organizationId, bPlainMembership!.id, a.ownerUserId, null);
       expect(removeResult).toBe('not_found');
       expect(await tenant.getMemberForOrganization(b.organizationId, bPlainMembership!.id)).not.toBeNull();
     });

@@ -49,6 +49,11 @@ export interface CapacitySnapshotMetrics {
 // Fixed, low-cardinality reasons only — never a user/org/project/domain id.
 export type AuthorizationDenialReason = 'unauthenticated' | 'not_member' | 'insufficient_role';
 
+// Checkpoint 3C. Fixed enums only — never an id/requestId/IP/hostname/URL.
+export type AuditEventResultLabel = 'success' | 'failure';
+export type CsrfRejectionReason = 'missing_origin' | 'malformed_origin' | 'untrusted_origin';
+export type AuthSecurityEventLabel = 'auth.login.success' | 'auth.login.failure' | 'auth.logout';
+
 export type DomainVerificationMethodLabel = 'dns_txt' | 'html_file';
 export type DomainVerificationResultLabel = 'success' | 'failure';
 
@@ -91,6 +96,9 @@ export interface Metrics {
     result: DatabaseOperationResultLabel,
   ) => void;
   incrementAuthorizationDenial: (reason: AuthorizationDenialReason) => void;
+  incrementAuditEvent: (action: string, result: AuditEventResultLabel) => void;
+  incrementCsrfRejection: (reason: CsrfRejectionReason) => void;
+  incrementAuthSecurityEvent: (event: AuthSecurityEventLabel) => void;
   getMetrics: () => Promise<string>;
   getContentType: () => string;
   reset: () => void;
@@ -258,6 +266,27 @@ export function createMetrics(options?: CreateMetricsOptions): Metrics {
     registers: [register],
   });
 
+  const auditEventsTotal = new Counter({
+    name: `${prefix}audit_events_total`,
+    help: 'Total audit events written, by action and result (fixed enums only)',
+    labelNames: ['action', 'result'] as const,
+    registers: [register],
+  });
+
+  const csrfRejectionsTotal = new Counter({
+    name: `${prefix}csrf_rejections_total`,
+    help: 'Total CSRF/Origin rejections on cookie-authenticated mutations, by fixed reason',
+    labelNames: ['reason'] as const,
+    registers: [register],
+  });
+
+  const authSecurityEventsTotal = new Counter({
+    name: `${prefix}auth_security_events_total`,
+    help: 'Total pre-tenant authentication security events, by fixed event name',
+    labelNames: ['event'] as const,
+    registers: [register],
+  });
+
   return {
     observeRenderDuration(seconds) {
       safe(() => renderDurationSeconds.observe(seconds));
@@ -309,6 +338,15 @@ export function createMetrics(options?: CreateMetricsOptions): Metrics {
     incrementAuthorizationDenial(reason) {
       safe(() => authorizationDenialsTotal.labels(reason).inc());
     },
+    incrementAuditEvent(action, result) {
+      safe(() => auditEventsTotal.labels(action, result).inc());
+    },
+    incrementCsrfRejection(reason) {
+      safe(() => csrfRejectionsTotal.labels(reason).inc());
+    },
+    incrementAuthSecurityEvent(event) {
+      safe(() => authSecurityEventsTotal.labels(event).inc());
+    },
     async getMetrics() {
       try {
         return await register.metrics();
@@ -343,6 +381,9 @@ export function createNoopMetrics(): Metrics {
     incrementSitemapUrlsDiscovered() {},
     incrementDatabaseOperation() {},
     incrementAuthorizationDenial() {},
+    incrementAuditEvent() {},
+    incrementCsrfRejection() {},
+    incrementAuthSecurityEvent() {},
     async getMetrics() {
       return '';
     },

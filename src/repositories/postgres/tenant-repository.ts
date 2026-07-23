@@ -11,6 +11,8 @@ import {
   organization as organizationTable,
 } from '../../db/schema.js';
 import { AppError } from '../../lib/app-error.js';
+import { insertAuditEventRow } from './audit-repository.js';
+import { buildAuditMetadata } from '../../lib/audit-events.js';
 import type {
   Project,
   Domain,
@@ -447,12 +449,29 @@ export function createTenantRepository(db: Database) {
       organizationId: string,
       memberId: string,
       role: 'admin' | 'member',
+      actorUserId: string,
+      requestId: string | null,
     ): Promise<MemberSummary | null> {
       const existing = await db.query.member.findFirst({
         where: and(eq(memberTable.id, memberId), eq(memberTable.organizationId, organizationId)),
       });
       if (!existing) return null;
-      await db.update(memberTable).set({ role }).where(eq(memberTable.id, memberId));
+      const roleBefore = existing.role;
+      await db.transaction(async (tx) => {
+        await tx.update(memberTable).set({ role }).where(eq(memberTable.id, memberId));
+        await insertAuditEventRow(tx, {
+          organizationId,
+          actorUserId,
+          actorApiKeyId: null,
+          action: 'organization.member.role_changed',
+          targetType: 'member',
+          targetId: memberId,
+          result: 'success',
+          errorCode: null,
+          requestId,
+          metadata: buildAuditMetadata({ roleBefore, roleAfter: role }),
+        });
+      });
       const rows = await db
         .select({
           id: memberTable.id,
@@ -469,12 +488,31 @@ export function createTenantRepository(db: Database) {
       return rows[0] ?? null;
     },
 
-    async removeMemberForOrganization(organizationId: string, memberId: string): Promise<'removed' | 'not_found'> {
+    async removeMemberForOrganization(
+      organizationId: string,
+      memberId: string,
+      actorUserId: string,
+      requestId: string | null,
+    ): Promise<'removed' | 'not_found'> {
       const existing = await db.query.member.findFirst({
         where: and(eq(memberTable.id, memberId), eq(memberTable.organizationId, organizationId)),
       });
       if (!existing) return 'not_found';
-      await db.delete(memberTable).where(eq(memberTable.id, memberId));
+      await db.transaction(async (tx) => {
+        await tx.delete(memberTable).where(eq(memberTable.id, memberId));
+        await insertAuditEventRow(tx, {
+          organizationId,
+          actorUserId,
+          actorApiKeyId: null,
+          action: 'organization.member.removed',
+          targetType: 'member',
+          targetId: memberId,
+          result: 'success',
+          errorCode: null,
+          requestId,
+          metadata: buildAuditMetadata({ roleBefore: existing.role }),
+        });
+      });
       return 'removed';
     },
 
@@ -512,16 +550,32 @@ export function createTenantRepository(db: Database) {
     async cancelInvitationForOrganization(
       organizationId: string,
       invitationId: string,
+      actorUserId: string,
+      requestId: string | null,
     ): Promise<'cancelled' | 'not_found' | 'already_used'> {
       const existing = await db.query.invitations.findFirst({
         where: and(eq(invitations.id, invitationId), eq(invitations.organizationId, organizationId)),
       });
       if (!existing) return 'not_found';
       if (existing.status !== 'pending') return 'already_used';
-      await db
-        .update(invitations)
-        .set({ status: 'revoked', updatedAt: new Date() })
-        .where(and(eq(invitations.id, invitationId), eq(invitations.status, 'pending')));
+      await db.transaction(async (tx) => {
+        await tx
+          .update(invitations)
+          .set({ status: 'revoked', updatedAt: new Date() })
+          .where(and(eq(invitations.id, invitationId), eq(invitations.status, 'pending')));
+        await insertAuditEventRow(tx, {
+          organizationId,
+          actorUserId,
+          actorApiKeyId: null,
+          action: 'organization.invitation.cancelled',
+          targetType: 'invitation',
+          targetId: invitationId,
+          result: 'success',
+          errorCode: null,
+          requestId,
+          metadata: null,
+        });
+      });
       return 'cancelled';
     },
   };

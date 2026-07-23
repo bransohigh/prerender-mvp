@@ -77,6 +77,7 @@ describe('auth + onboarding (real Postgres)', () => {
       email: 'invitee@example.com',
       role: 'member',
       invitedByUserId: ownerId,
+      requestId: null,
     });
     expect(invite.token).toHaveLength(64);
 
@@ -85,6 +86,7 @@ describe('auth + onboarding (real Postgres)', () => {
       name: 'Invitee',
       password: 'another-long-passphrase',
       auth,
+      requestId: null,
     });
     expect(result.organizationId).toBe(organizationId);
 
@@ -102,12 +104,14 @@ describe('auth + onboarding (real Postgres)', () => {
       email: 'reuse@example.com',
       role: 'member',
       invitedByUserId: ownerId,
+      requestId: null,
     });
     await invitationService.acceptInvitation({
       token: invite.token,
       name: 'Reuse',
       password: 'another-long-passphrase',
       auth,
+      requestId: null,
     });
 
     await expect(
@@ -116,6 +120,7 @@ describe('auth + onboarding (real Postgres)', () => {
         name: 'Reuse',
         password: 'another-long-passphrase',
         auth,
+        requestId: null,
       }),
     ).rejects.toThrow();
   });
@@ -128,6 +133,7 @@ describe('auth + onboarding (real Postgres)', () => {
       email: 'expired@example.com',
       role: 'member',
       invitedByUserId: ownerId,
+      requestId: null,
     });
 
     const { invitations } = await import('../../src/db/schema.js');
@@ -142,6 +148,7 @@ describe('auth + onboarding (real Postgres)', () => {
         name: 'Expired',
         password: 'another-long-passphrase',
         auth,
+        requestId: null,
       }),
     ).rejects.toThrow();
   });
@@ -154,6 +161,7 @@ describe('auth + onboarding (real Postgres)', () => {
       email: 'hash-check@example.com',
       role: 'member',
       invitedByUserId: ownerId,
+      requestId: null,
     });
 
     const { invitations } = await import('../../src/db/schema.js');
@@ -178,6 +186,7 @@ describe('auth + onboarding (real Postgres)', () => {
       email: 'existing@example.com',
       role: 'member',
       invitedByUserId: ownerId,
+      requestId: null,
     });
 
     await expect(
@@ -186,6 +195,7 @@ describe('auth + onboarding (real Postgres)', () => {
         name: 'Existing',
         password: 'wrong-guess-password',
         auth,
+        requestId: null,
       }),
     ).rejects.toThrow();
 
@@ -195,6 +205,7 @@ describe('auth + onboarding (real Postgres)', () => {
       name: 'Existing',
       password: 'their-own-real-password',
       auth,
+      requestId: null,
     });
     expect(result.organizationId).toBe(organizationId);
   });
@@ -212,6 +223,7 @@ describe('auth + onboarding (real Postgres)', () => {
       email: 'victim@example.com',
       role: 'admin',
       invitedByUserId: ownerId,
+      requestId: null,
     });
 
     await expect(
@@ -220,6 +232,7 @@ describe('auth + onboarding (real Postgres)', () => {
         name: 'Attacker',
         password: 'attacker-guessed-password',
         auth,
+        requestId: null,
       }),
     ).rejects.toThrow();
 
@@ -239,11 +252,12 @@ describe('auth + onboarding (real Postgres)', () => {
       email: 'race@example.com',
       role: 'member',
       invitedByUserId: ownerId,
+      requestId: null,
     });
 
     const attempts = await Promise.allSettled([
-      invitationService.acceptInvitation({ token: invite.token, name: 'Race1', password: 'password-one-long', auth }),
-      invitationService.acceptInvitation({ token: invite.token, name: 'Race2', password: 'password-two-long', auth }),
+      invitationService.acceptInvitation({ token: invite.token, name: 'Race1', password: 'password-one-long', auth, requestId: null }),
+      invitationService.acceptInvitation({ token: invite.token, name: 'Race2', password: 'password-two-long', auth, requestId: null }),
     ]);
 
     const fulfilled = attempts.filter((a) => a.status === 'fulfilled');

@@ -110,7 +110,7 @@ describe('invitation accept rate limiting (real HTTP route)', () => {
 
     const { createInvitationService } = await import('../../src/services/invitation-service.js');
     const invitationService = createInvitationService(dbClient.db);
-    const invite = await invitationService.createInvitation({ organizationId: org.id, email: 'invitee@example.com', role: 'member', invitedByUserId: signUp.user.id });
+    const invite = await invitationService.createInvitation({ organizationId: org.id, email: 'invitee@example.com', role: 'member', invitedByUserId: signUp.user.id, requestId: null });
 
     const res = await app.inject({
       method: 'POST',

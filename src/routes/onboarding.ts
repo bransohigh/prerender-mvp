@@ -57,6 +57,7 @@ export async function onboardingRoutes(app: FastifyInstance, options: Onboarding
         name: body.name,
         password: body.password,
         auth,
+        requestId: request.id,
       });
       // Success clears this token's bucket — irrelevant in practice since
       // the token is single-use and about to be marked accepted, but keeps

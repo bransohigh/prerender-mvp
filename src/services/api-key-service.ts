@@ -105,6 +105,7 @@ export function createApiKeyService(tenant: TenantRepository, apiKeyRepo: ApiKey
     name: string;
     expiresInDays?: number;
     createdByUserId: string;
+    requestId: string | null;
   }): Promise<CreateApiKeyResult> {
     const project = await tenant.getProjectForOrganization(params.organizationId, params.projectId);
     if (!project) {
@@ -134,6 +135,7 @@ export function createApiKeyService(tenant: TenantRepository, apiKeyRepo: ApiKey
       rateLimitMax: KEY_RATE_LIMIT_MAX,
       rateLimitTimeWindowMs: KEY_RATE_LIMIT_WINDOW_MS,
       metadata,
+      requestId: params.requestId,
     });
 
     return { ...toSummary(created), key: created.key };
@@ -148,7 +150,13 @@ export function createApiKeyService(tenant: TenantRepository, apiKeyRepo: ApiKey
     return rows.map(toSummary);
   }
 
-  async function revokeKey(organizationId: string, projectId: string, keyId: string): Promise<RevokeKeyResult> {
+  async function revokeKey(
+    organizationId: string,
+    projectId: string,
+    keyId: string,
+    actorUserId: string,
+    requestId: string | null,
+  ): Promise<RevokeKeyResult> {
     const existing = await apiKeyRepo.getApiKeyForProject(organizationId, projectId, keyId);
     if (!existing) return 'not_found';
     if (!existing.enabled) return 'already_revoked';
@@ -159,7 +167,7 @@ export function createApiKeyService(tenant: TenantRepository, apiKeyRepo: ApiKey
       revokedAt: new Date().toISOString(),
     };
 
-    await apiKeyRepo.setEnabledAndMetadataForProject(organizationId, projectId, keyId, false, metadata);
+    await apiKeyRepo.setEnabledAndMetadataForProject(organizationId, projectId, keyId, false, metadata, actorUserId, requestId);
     return 'revoked';
   }
 
@@ -168,6 +176,7 @@ export function createApiKeyService(tenant: TenantRepository, apiKeyRepo: ApiKey
     projectId: string,
     keyId: string,
     createdByUserId: string,
+    requestId: string | null,
   ): Promise<RotateKeyResult> {
     // A pre-check (outside the transaction) only picks reasonable
     // name/expiry defaults for the successor — it is not relied upon for
@@ -193,6 +202,7 @@ export function createApiKeyService(tenant: TenantRepository, apiKeyRepo: ApiKey
       rateLimitMax: KEY_RATE_LIMIT_MAX,
       rateLimitTimeWindowMs: KEY_RATE_LIMIT_WINDOW_MS,
       createdByUserId,
+      requestId,
     });
 
     if (result.outcome !== 'rotated') return result.outcome;

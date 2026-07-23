@@ -271,6 +271,15 @@ export const invitations = pgTable('invitations', {
 // Audit log
 // ---------------------------------------------------------------------------
 
+// auth.login.success/failure/logout are declared here for forward
+// compatibility with the enum's original design, but Checkpoint 3C
+// deliberately does not write audit_events rows for them: a login attempt
+// has no organizationId yet (a user may belong to zero or many
+// organizations), and audit_events.organizationId being nullable in the
+// schema is not the same as it being safe to populate the tenant-scoped
+// audit log/endpoint with tenantless rows. Pre-tenant authentication
+// events are recorded as structured security logs + metrics instead — see
+// src/lib/audit-events.ts and AUDIT_LOGGING.md.
 export const auditActionEnum = pgEnum('audit_action', [
   'auth.login.success',
   'auth.login.failure',
@@ -289,6 +298,15 @@ export const auditActionEnum = pgEnum('audit_action', [
   'api_key.rotated',
   'api_key.revoked',
   'render.authorization_rejected',
+  'organization.invitation.cancelled',
+  'organization.member.removed',
+  'domain.verification_token.rotated',
+  'sitemap.discovery.started',
+  'sitemap.discovery.completed',
+  'sitemap.discovery.failed',
+  'sitemap.fetch.started',
+  'sitemap.fetch.completed',
+  'sitemap.fetch.failed',
 ]);
 
 export const auditResultEnum = pgEnum('audit_result', ['success', 'failure']);

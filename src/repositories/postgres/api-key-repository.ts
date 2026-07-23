@@ -3,6 +3,8 @@ import { eq, and } from 'drizzle-orm';
 import { defaultKeyHasher as betterAuthDefaultKeyHasher } from '@better-auth/api-key';
 import { apikey } from '../../db/schema.js';
 import type { Database } from '../../db/client.js';
+import { insertAuditEventRow } from './audit-repository.js';
+import { buildAuditMetadata } from '../../lib/audit-events.js';
 
 // Direct, organization+project-scoped access to Better Auth's `apikey`
 // table (configured with `references: 'organization'` in src/auth/auth.ts,
@@ -172,6 +174,9 @@ export function createApiKeyRepository(db: Database) {
   return {
     getApiKeyForProject,
 
+    // Mutation + audit row commit in the same transaction (Checkpoint 3C):
+    // if the audit insert fails, the key insert rolls back too — the API
+    // must never report a created key that has no audit trail.
     async createApiKeyForProject(params: {
       organizationId: string;
       name: string;
@@ -180,33 +185,50 @@ export function createApiKeyRepository(db: Database) {
       rateLimitMax: number;
       rateLimitTimeWindowMs: number;
       metadata: ApiKeyMetadata;
+      requestId: string | null;
     }): Promise<ApiKeyRow & { key: string }> {
       const { plaintext, hashed, start } = await generateKeyMaterial(params.prefix);
       const now = new Date();
 
-      const [row] = await db
-        .insert(apikey)
-        .values({
-          id: randomUUID(),
-          configId: 'default',
-          name: params.name,
-          prefix: params.prefix,
-          start,
-          key: hashed,
-          referenceId: params.organizationId,
-          enabled: true,
-          rateLimitEnabled: true,
-          rateLimitMax: params.rateLimitMax,
-          rateLimitTimeWindow: params.rateLimitTimeWindowMs,
-          requestCount: 0,
-          expiresAt: params.expiresAt,
-          createdAt: now,
-          updatedAt: now,
-          metadata: JSON.stringify(params.metadata),
-        })
-        .returning();
+      return db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(apikey)
+          .values({
+            id: randomUUID(),
+            configId: 'default',
+            name: params.name,
+            prefix: params.prefix,
+            start,
+            key: hashed,
+            referenceId: params.organizationId,
+            enabled: true,
+            rateLimitEnabled: true,
+            rateLimitMax: params.rateLimitMax,
+            rateLimitTimeWindow: params.rateLimitTimeWindowMs,
+            requestCount: 0,
+            expiresAt: params.expiresAt,
+            createdAt: now,
+            updatedAt: now,
+            metadata: JSON.stringify(params.metadata),
+          })
+          .returning();
 
-      return { ...toRow(row!), key: plaintext };
+        const created = toRow(row!);
+        await insertAuditEventRow(tx, {
+          organizationId: params.organizationId,
+          actorUserId: params.metadata.createdByUserId || null,
+          actorApiKeyId: null,
+          action: 'api_key.created',
+          targetType: 'api_key',
+          targetId: created.id,
+          result: 'success',
+          errorCode: null,
+          requestId: params.requestId,
+          metadata: buildAuditMetadata({ apiKeyName: params.name, apiKeyPrefix: params.prefix }),
+        });
+
+        return { ...created, key: plaintext };
+      });
     },
 
     async listApiKeysForProject(organizationId: string, projectId: string): Promise<ApiKeyRow[]> {
@@ -220,13 +242,32 @@ export function createApiKeyRepository(db: Database) {
       keyId: string,
       enabled: boolean,
       metadata: ApiKeyMetadata,
+      actorUserId: string,
+      requestId: string | null,
     ): Promise<boolean> {
       const existing = await getApiKeyForProject(organizationId, projectId, keyId);
       if (!existing) return false;
-      await db
-        .update(apikey)
-        .set({ enabled, metadata: JSON.stringify(metadata), updatedAt: new Date() })
-        .where(and(eq(apikey.id, keyId), eq(apikey.referenceId, organizationId)));
+      await db.transaction(async (tx) => {
+        await tx
+          .update(apikey)
+          .set({ enabled, metadata: JSON.stringify(metadata), updatedAt: new Date() })
+          .where(and(eq(apikey.id, keyId), eq(apikey.referenceId, organizationId)));
+        await insertAuditEventRow(tx, {
+          organizationId,
+          actorUserId,
+          actorApiKeyId: null,
+          action: 'api_key.revoked',
+          targetType: 'api_key',
+          targetId: keyId,
+          result: 'success',
+          errorCode: null,
+          requestId,
+          metadata: buildAuditMetadata({
+            apiKeyName: existing.name ?? undefined,
+            apiKeyPrefix: existing.prefix ?? undefined,
+          }),
+        });
+      });
       return true;
     },
 
@@ -252,6 +293,7 @@ export function createApiKeyRepository(db: Database) {
       rateLimitMax: number;
       rateLimitTimeWindowMs: number;
       createdByUserId: string;
+      requestId: string | null;
     }): Promise<RotateApiKeyResult> {
       return db.transaction(async (tx) => {
         const [row] = await tx
@@ -315,6 +357,19 @@ export function createApiKeyRepository(db: Database) {
           .update(apikey)
           .set({ enabled: false, metadata: JSON.stringify(revokedMetadata), updatedAt: now })
           .where(eq(apikey.id, params.keyId));
+
+        await insertAuditEventRow(tx, {
+          organizationId: params.organizationId,
+          actorUserId: params.createdByUserId,
+          actorApiKeyId: null,
+          action: 'api_key.rotated',
+          targetType: 'api_key',
+          targetId: newId,
+          result: 'success',
+          errorCode: null,
+          requestId: params.requestId,
+          metadata: buildAuditMetadata({ apiKeyName: params.name, apiKeyPrefix: params.prefix }),
+        });
 
         return {
           outcome: 'rotated',
