@@ -3,7 +3,7 @@ import { eq, and } from 'drizzle-orm';
 import { defaultKeyHasher as betterAuthDefaultKeyHasher } from '@better-auth/api-key';
 import { apikey } from '../../db/schema.js';
 import type { Database } from '../../db/client.js';
-import { insertAuditEventRow } from './audit-repository.js';
+import { insertAuditEventRow, runAuditedTransaction } from './audit-repository.js';
 import { buildAuditMetadata } from '../../lib/audit-events.js';
 import { createNoopMetrics, type Metrics } from '../../lib/metrics.js';
 
@@ -191,7 +191,7 @@ export function createApiKeyRepository(db: Database, metrics: Metrics = createNo
       const { plaintext, hashed, start } = await generateKeyMaterial(params.prefix);
       const now = new Date();
 
-      return db.transaction(async (tx) => {
+      return runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
         const [row] = await tx
           .insert(apikey)
           .values({
@@ -215,6 +215,7 @@ export function createApiKeyRepository(db: Database, metrics: Metrics = createNo
           .returning();
 
         const created = toRow(row!);
+        setAuditedAction('api_key.created');
         await insertAuditEventRow(tx, {
           organizationId: params.organizationId,
           actorUserId: params.metadata.createdByUserId || null,
@@ -226,7 +227,7 @@ export function createApiKeyRepository(db: Database, metrics: Metrics = createNo
           errorCode: null,
           requestId: params.requestId,
           metadata: buildAuditMetadata({ apiKeyName: params.name, apiKeyPrefix: params.prefix }),
-        }, metrics);
+        });
 
         return { ...created, key: plaintext };
       });
@@ -248,11 +249,12 @@ export function createApiKeyRepository(db: Database, metrics: Metrics = createNo
     ): Promise<boolean> {
       const existing = await getApiKeyForProject(organizationId, projectId, keyId);
       if (!existing) return false;
-      await db.transaction(async (tx) => {
+      await runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
         await tx
           .update(apikey)
           .set({ enabled, metadata: JSON.stringify(metadata), updatedAt: new Date() })
           .where(and(eq(apikey.id, keyId), eq(apikey.referenceId, organizationId)));
+        setAuditedAction('api_key.revoked');
         await insertAuditEventRow(tx, {
           organizationId,
           actorUserId,
@@ -267,7 +269,7 @@ export function createApiKeyRepository(db: Database, metrics: Metrics = createNo
             apiKeyName: existing.name ?? undefined,
             apiKeyPrefix: existing.prefix ?? undefined,
           }),
-        }, metrics);
+        });
       });
       return true;
     },
@@ -296,7 +298,7 @@ export function createApiKeyRepository(db: Database, metrics: Metrics = createNo
       createdByUserId: string;
       requestId: string | null;
     }): Promise<RotateApiKeyResult> {
-      return db.transaction(async (tx) => {
+      return runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
         const [row] = await tx
           .select()
           .from(apikey)
@@ -359,6 +361,7 @@ export function createApiKeyRepository(db: Database, metrics: Metrics = createNo
           .set({ enabled: false, metadata: JSON.stringify(revokedMetadata), updatedAt: now })
           .where(eq(apikey.id, params.keyId));
 
+        setAuditedAction('api_key.rotated');
         await insertAuditEventRow(tx, {
           organizationId: params.organizationId,
           actorUserId: params.createdByUserId,
@@ -370,7 +373,7 @@ export function createApiKeyRepository(db: Database, metrics: Metrics = createNo
           errorCode: null,
           requestId: params.requestId,
           metadata: buildAuditMetadata({ apiKeyName: params.name, apiKeyPrefix: params.prefix }),
-        }, metrics);
+        });
 
         return {
           outcome: 'rotated',

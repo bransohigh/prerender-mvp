@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { createFakeSitemapRepository } from '../src/repositories/fake/fake-sitemap-repository.js';
-import { discoverSitemapSources, assertDomainVerifiedForSitemap } from '../src/services/sitemap-discovery-service.js';
+import { scanForSitemapCandidates, assertDomainVerifiedForSitemap } from '../src/services/sitemap-discovery-service.js';
 import type { SafeFetchResult, safeFetch } from '../src/lib/safe-http-client.js';
 import type { Domain } from '../src/repositories/types.js';
 
@@ -42,10 +41,9 @@ describe('assertDomainVerifiedForSitemap', () => {
   });
 });
 
-describe('discoverSitemapSources', () => {
+describe('scanForSitemapCandidates', () => {
   it('discovers sitemaps listed in robots.txt', async () => {
     const domain = makeDomain();
-    const repo = createFakeSitemapRepository();
     const fetchImpl = fakeFetch((url) => {
       if (url.endsWith('/robots.txt')) {
         return {
@@ -57,9 +55,9 @@ describe('discoverSitemapSources', () => {
       return { status: 404, body: Buffer.from(''), headers: {} };
     });
 
-    const result = await discoverSitemapSources(domain, repo, { fetchImpl });
+    const result = await scanForSitemapCandidates(domain, { fetchImpl });
     expect(result.robotsFound).toBe(true);
-    const urls = result.sources.map((s) => s.url);
+    const urls = result.candidates.map((s) => s.url);
     expect(urls).toContain('https://example.com/custom-sitemap.xml');
     expect(urls).toContain('https://example.com/sitemap.xml');
     expect(urls).toContain('https://example.com/sitemap_index.xml');
@@ -67,17 +65,15 @@ describe('discoverSitemapSources', () => {
 
   it('falls back to default locations when robots.txt is missing', async () => {
     const domain = makeDomain();
-    const repo = createFakeSitemapRepository();
     const fetchImpl = fakeFetch(() => ({ status: 404, body: Buffer.from(''), headers: {} }));
 
-    const result = await discoverSitemapSources(domain, repo, { fetchImpl });
+    const result = await scanForSitemapCandidates(domain, { fetchImpl });
     expect(result.robotsFound).toBe(false);
-    expect(result.sources).toHaveLength(2);
+    expect(result.candidates).toHaveLength(2);
   });
 
   it('rejects an off-domain sitemap URL from robots.txt silently (does not throw)', async () => {
     const domain = makeDomain();
-    const repo = createFakeSitemapRepository();
     const fetchImpl = fakeFetch((url) => {
       if (url.endsWith('/robots.txt')) {
         return {
@@ -89,13 +85,12 @@ describe('discoverSitemapSources', () => {
       return { status: 404, body: Buffer.from(''), headers: {} };
     });
 
-    const result = await discoverSitemapSources(domain, repo, { fetchImpl });
-    expect(result.sources.map((s) => s.url)).not.toContain('https://evil.com/sitemap.xml');
+    const result = await scanForSitemapCandidates(domain, { fetchImpl });
+    expect(result.candidates.map((s) => s.url)).not.toContain('https://evil.com/sitemap.xml');
   });
 
   it('deduplicates repeated sitemap URLs across robots.txt and defaults', async () => {
     const domain = makeDomain();
-    const repo = createFakeSitemapRepository();
     const fetchImpl = fakeFetch((url) => {
       if (url.endsWith('/robots.txt')) {
         return {
@@ -107,8 +102,8 @@ describe('discoverSitemapSources', () => {
       return { status: 404, body: Buffer.from(''), headers: {} };
     });
 
-    const result = await discoverSitemapSources(domain, repo, { fetchImpl });
-    const sitemapXmlCount = result.sources.filter((s) => s.url === 'https://example.com/sitemap.xml').length;
+    const result = await scanForSitemapCandidates(domain, { fetchImpl });
+    const sitemapXmlCount = result.candidates.filter((s) => s.url === 'https://example.com/sitemap.xml').length;
     expect(sitemapXmlCount).toBe(1);
   });
 });

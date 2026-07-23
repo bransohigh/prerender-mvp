@@ -1,11 +1,9 @@
 import zlib from 'node:zlib';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { createFakeSitemapRepository } from '../src/repositories/fake/fake-sitemap-repository.js';
-import { createFakeDiscoveredUrlRepository } from '../src/repositories/fake/fake-discovered-url-repository.js';
-import { fetchAndParseSitemapSource } from '../src/services/sitemap-fetch-service.js';
+import { buildSitemapFetchTree, countDiscoveredUrls, SITEMAP_FETCH_LIMITS } from '../src/services/sitemap-fetch-service.js';
 import type { SafeFetchResult, safeFetch } from '../src/lib/safe-http-client.js';
-import type { Domain, SitemapSource } from '../src/repositories/types.js';
+import type { Domain } from '../src/repositories/types.js';
 
 function makeDomain(): Domain {
   const now = new Date();
@@ -25,29 +23,12 @@ function makeDomain(): Domain {
   };
 }
 
-function makeSource(domainId: string, overrides: Partial<SitemapSource> = {}): SitemapSource {
-  const now = new Date();
-  return {
-    id: randomUUID(),
-    domainId,
-    url: 'https://example.com/sitemap.xml',
-    normalizedUrl: 'https://example.com/sitemap.xml',
-    type: 'sitemap',
-    status: 'pending',
-    lastFetchedAt: null,
-    lastHttpStatus: null,
-    lastErrorCode: null,
-    etag: null,
-    lastModified: null,
-    discoveredUrlCount: 0,
-    createdAt: now,
-    updatedAt: now,
-    ...overrides,
-  };
-}
-
 function fakeFetch(handler: (url: string) => SafeFetchResult): typeof safeFetch {
   return (async (url: string) => handler(url)) as typeof safeFetch;
+}
+
+function freshState() {
+  return { nestedCount: 0, remainingUrlBudget: SITEMAP_FETCH_LIMITS.maxTotalUrlsPerDomain };
 }
 
 const URLSET_XML = `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -59,43 +40,20 @@ const INDEX_XML = `<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/
   <sitemap><loc>https://example.com/part-1.xml</loc></sitemap>
 </sitemapindex>`;
 
-describe('fetchAndParseSitemapSource', () => {
-  it('parses a plain urlset and stores discovered URLs', async () => {
+describe('buildSitemapFetchTree (pure network+parse, no database access)', () => {
+  it('parses a plain urlset into the tree', async () => {
     const domain = makeDomain();
-    const sitemapRepository = createFakeSitemapRepository();
-    const discoveredUrlRepository = createFakeDiscoveredUrlRepository();
-    const source = await sitemapRepository.upsert({
-      domainId: domain.id,
-      url: 'https://example.com/sitemap.xml',
-      normalizedUrl: 'https://example.com/sitemap.xml',
-      type: 'sitemap',
-    });
-
     const fetchImpl = fakeFetch(() => ({ status: 200, body: Buffer.from(URLSET_XML), headers: {} }));
-    const outcome = await fetchAndParseSitemapSource(domain, source, sitemapRepository, discoveredUrlRepository, {
-      fetchImpl,
-    });
 
-    expect(outcome.discoveredCount).toBe(2);
-    expect(await discoveredUrlRepository.countByDomain(domain.id)).toBe(2);
+    const tree = await buildSitemapFetchTree(domain, 'https://example.com/sitemap.xml', 0, freshState(), { fetchImpl });
+
+    expect(tree.outcome.status).toBe('success');
+    expect(countDiscoveredUrls(tree)).toBe(2);
+    expect(tree.children).toHaveLength(0);
   });
 
-  it('recurses into a sitemap index and fetches nested sitemaps', async () => {
+  it('recurses into a sitemap index and captures nested sitemaps as children', async () => {
     const domain = makeDomain();
-    const sitemapRepository = createFakeSitemapRepository();
-    const discoveredUrlRepository = createFakeDiscoveredUrlRepository();
-    const source = makeSource(domain.id, {
-      url: 'https://example.com/sitemap_index.xml',
-      normalizedUrl: 'https://example.com/sitemap_index.xml',
-      type: 'sitemap_index',
-    });
-    await sitemapRepository.upsert({
-      domainId: domain.id,
-      url: source.url,
-      normalizedUrl: source.normalizedUrl,
-      type: 'sitemap_index',
-    });
-
     const fetchImpl = fakeFetch((url) => {
       if (url === 'https://example.com/sitemap_index.xml') {
         return { status: 200, body: Buffer.from(INDEX_XML), headers: {} };
@@ -103,102 +61,93 @@ describe('fetchAndParseSitemapSource', () => {
       return { status: 200, body: Buffer.from(URLSET_XML), headers: {} };
     });
 
-    const outcome = await fetchAndParseSitemapSource(domain, source, sitemapRepository, discoveredUrlRepository, {
-      fetchImpl,
-    });
-    expect(outcome.discoveredCount).toBe(2);
+    const tree = await buildSitemapFetchTree(domain, 'https://example.com/sitemap_index.xml', 0, freshState(), { fetchImpl });
 
-    const nested = await sitemapRepository.listByDomain(domain.id);
-    expect(nested.some((s) => s.url === 'https://example.com/part-1.xml')).toBe(true);
+    expect(countDiscoveredUrls(tree)).toBe(2);
+    expect(tree.children).toHaveLength(1);
+    expect(tree.children[0]!.url).toBe('https://example.com/part-1.xml');
+    expect(tree.children[0]!.outcome.status).toBe('success');
   });
 
   it('handles gzip-compressed sitemap responses', async () => {
     const domain = makeDomain();
-    const sitemapRepository = createFakeSitemapRepository();
-    const discoveredUrlRepository = createFakeDiscoveredUrlRepository();
-    const source = makeSource(domain.id);
     const gzipped = zlib.gzipSync(Buffer.from(URLSET_XML));
+    const fetchImpl = fakeFetch(() => ({ status: 200, body: gzipped, headers: { 'content-encoding': 'gzip' } }));
 
-    const fetchImpl = fakeFetch(() => ({
-      status: 200,
-      body: gzipped,
-      headers: { 'content-encoding': 'gzip' },
-    }));
-
-    const outcome = await fetchAndParseSitemapSource(domain, source, sitemapRepository, discoveredUrlRepository, {
-      fetchImpl,
-    });
-    expect(outcome.discoveredCount).toBe(2);
+    const tree = await buildSitemapFetchTree(domain, 'https://example.com/sitemap.xml', 0, freshState(), { fetchImpl });
+    expect(countDiscoveredUrls(tree)).toBe(2);
   });
 
   it('detects gzip by magic bytes even without a content-encoding header', async () => {
     const domain = makeDomain();
-    const sitemapRepository = createFakeSitemapRepository();
-    const discoveredUrlRepository = createFakeDiscoveredUrlRepository();
-    const source = makeSource(domain.id, { url: 'https://example.com/sitemap.xml.gz', normalizedUrl: 'https://example.com/sitemap.xml.gz' });
     const gzipped = zlib.gzipSync(Buffer.from(URLSET_XML));
-
     const fetchImpl = fakeFetch(() => ({ status: 200, body: gzipped, headers: {} }));
 
-    const outcome = await fetchAndParseSitemapSource(domain, source, sitemapRepository, discoveredUrlRepository, {
-      fetchImpl,
-    });
-    expect(outcome.discoveredCount).toBe(2);
+    const tree = await buildSitemapFetchTree(domain, 'https://example.com/sitemap.xml.gz', 0, freshState(), { fetchImpl });
+    expect(countDiscoveredUrls(tree)).toBe(2);
   });
 
   it('rejects URLs from a different domain silently (skips, does not throw)', async () => {
     const domain = makeDomain();
-    const sitemapRepository = createFakeSitemapRepository();
-    const discoveredUrlRepository = createFakeDiscoveredUrlRepository();
-    const source = makeSource(domain.id);
     const mixedXml = `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
       <url><loc>https://example.com/ok</loc></url>
       <url><loc>https://evil.com/bad</loc></url>
     </urlset>`;
-
     const fetchImpl = fakeFetch(() => ({ status: 200, body: Buffer.from(mixedXml), headers: {} }));
-    const outcome = await fetchAndParseSitemapSource(domain, source, sitemapRepository, discoveredUrlRepository, {
-      fetchImpl,
-    });
-    expect(outcome.discoveredCount).toBe(1);
+
+    const tree = await buildSitemapFetchTree(domain, 'https://example.com/sitemap.xml', 0, freshState(), { fetchImpl });
+    expect(countDiscoveredUrls(tree)).toBe(1);
   });
 
-  it('records SITEMAP_FETCH_FAILED and marks the source failed on non-200 status', async () => {
+  it('throws SITEMAP_FETCH_FAILED on non-200 status at the top level', async () => {
     const domain = makeDomain();
-    const sitemapRepository = createFakeSitemapRepository();
-    const discoveredUrlRepository = createFakeDiscoveredUrlRepository();
-    const source = await sitemapRepository.upsert({
-      domainId: domain.id,
-      url: 'https://example.com/sitemap.xml',
-      normalizedUrl: 'https://example.com/sitemap.xml',
-      type: 'sitemap',
-    });
-
     const fetchImpl = fakeFetch(() => ({ status: 500, body: Buffer.from(''), headers: {} }));
-    await expect(
-      fetchAndParseSitemapSource(domain, source, sitemapRepository, discoveredUrlRepository, { fetchImpl }),
-    ).rejects.toMatchObject({ code: 'SITEMAP_FETCH_FAILED' });
 
-    const updated = await sitemapRepository.findById(source.id);
-    expect(updated!.status).toBe('failed');
+    await expect(
+      buildSitemapFetchTree(domain, 'https://example.com/sitemap.xml', 0, freshState(), { fetchImpl }),
+    ).rejects.toMatchObject({ code: 'SITEMAP_FETCH_FAILED' });
   });
 
-  it('rejects DOCTYPE/XXE payloads via SITEMAP_PARSE_FAILED', async () => {
+  it('a nested (non-top-level) fetch failure is captured as a failed child node, not thrown', async () => {
     const domain = makeDomain();
-    const sitemapRepository = createFakeSitemapRepository();
-    const discoveredUrlRepository = createFakeDiscoveredUrlRepository();
-    const source = await sitemapRepository.upsert({
-      domainId: domain.id,
-      url: 'https://example.com/sitemap.xml',
-      normalizedUrl: 'https://example.com/sitemap.xml',
-      type: 'sitemap',
+    const fetchImpl = fakeFetch((url) => {
+      if (url === 'https://example.com/sitemap_index.xml') {
+        return { status: 200, body: Buffer.from(INDEX_XML), headers: {} };
+      }
+      return { status: 500, body: Buffer.from(''), headers: {} };
     });
+
+    const tree = await buildSitemapFetchTree(domain, 'https://example.com/sitemap_index.xml', 0, freshState(), { fetchImpl });
+    expect(tree.outcome.status).toBe('success');
+    expect(tree.children[0]!.outcome.status).toBe('failed');
+  });
+
+  it('rejects DOCTYPE/XXE payloads via SITEMAP_FETCH_FAILED', async () => {
+    const domain = makeDomain();
     const xxe = `<!DOCTYPE urlset [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
       <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://example.com/&xxe;</loc></url></urlset>`;
-
     const fetchImpl = fakeFetch(() => ({ status: 200, body: Buffer.from(xxe), headers: {} }));
+
     await expect(
-      fetchAndParseSitemapSource(domain, source, sitemapRepository, discoveredUrlRepository, { fetchImpl }),
+      buildSitemapFetchTree(domain, 'https://example.com/sitemap.xml', 0, freshState(), { fetchImpl }),
     ).rejects.toMatchObject({ code: 'SITEMAP_FETCH_FAILED' });
+  });
+
+  it('throws SITEMAP_LIMIT_EXCEEDED when the per-domain URL budget is already exhausted', async () => {
+    const domain = makeDomain();
+    const fetchImpl = fakeFetch(() => ({ status: 200, body: Buffer.from(URLSET_XML), headers: {} }));
+
+    await expect(
+      buildSitemapFetchTree(domain, 'https://example.com/sitemap.xml', 0, { nestedCount: 0, remainingUrlBudget: 0 }, { fetchImpl }),
+    ).rejects.toMatchObject({ code: 'SITEMAP_LIMIT_EXCEEDED' });
+  });
+
+  it('throws SITEMAP_LIMIT_EXCEEDED when recursion depth exceeds the limit', async () => {
+    const domain = makeDomain();
+    const fetchImpl = fakeFetch(() => ({ status: 200, body: Buffer.from(URLSET_XML), headers: {} }));
+
+    await expect(
+      buildSitemapFetchTree(domain, 'https://example.com/sitemap.xml', SITEMAP_FETCH_LIMITS.maxIndexDepth + 1, freshState(), { fetchImpl }),
+    ).rejects.toMatchObject({ code: 'SITEMAP_LIMIT_EXCEEDED' });
   });
 });

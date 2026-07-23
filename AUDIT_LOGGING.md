@@ -56,44 +56,65 @@ write volume for no additional security value.
 **Transactional (mutation + audit row commit together, or neither
 does)**: API key create/rotate/revoke, invitation create/cancel/accept,
 member role-change/removal, project create/update/delete, domain
-create/rotate-token, and the final verified/failed state persisted by
-domain verification. Each of these calls
+create/rotate-token, the final verified/failed state persisted by domain
+verification, and the final state persisted by sitemap discovery/fetch
+(see the two-stage section below — the *final* write in both cases is
+fully atomic with its audit event, not best-effort). Each of these calls
 `src/repositories/postgres/audit-repository.ts`'s `insertAuditEventRow()`
 **inside the same `db.transaction()`** as the mutation itself — if the
 audit insert throws (e.g. a metadata-allowlist violation, or a forced FK
 violation in a test), Postgres rolls back the entire transaction and the
-mutation never happened either. Proven in `test/db/audit-events.test.ts`
-and `test/db/audit-events-endpoint.test.ts` with tests that force the
-audit insert to fail and assert no mutation row was left behind.
+mutation never happened either. Proven in `test/db/audit-events.test.ts`,
+`test/db/audit-events-endpoint.test.ts`, and
+`test/db/audit-durability.test.ts` with tests that force the audit insert
+to fail and assert no mutation row was left behind.
 
-**Two-stage (network operation outside any transaction)**: domain
-verification and sitemap discovery/fetch involve outbound DNS/HTTP calls
-that must never happen while a database transaction is held open. The
-pattern:
+**Two-stage (network operation outside any transaction, final state
+atomic with its audit event)**: domain verification and sitemap
+discovery/fetch involve outbound DNS/HTTP calls that must never happen
+while a database transaction is held open. The pattern:
 
 1. Write a short, standalone `*.attempted` / `*.started` audit event
    (a single-row insert, not wrapped around the network call).
 2. If that write itself fails, do not start the network operation.
-3. Perform the DNS/HTTP/XML work with no open transaction.
+3. Perform the DNS/HTTP/XML fetch, decompression, and parsing entirely
+   outside any transaction, into a bounded, validated in-memory result —
+   see `scanForSitemapCandidates()` (`src/services/sitemap-discovery-service.ts`)
+   and `buildSitemapFetchTree()` (`src/services/sitemap-fetch-service.ts`),
+   neither of which touches the database at all.
 4. Persist the final state and the `*.succeeded`/`*.completed` (or
-   `*.failed`) audit event **together, in one new transaction** — for
-   domain verification this is fully atomic (see
-   `markVerificationAttemptForOrganization` in
-   `src/repositories/postgres/tenant-repository.ts`).
+   `*.failed`) audit event **together, in one new transaction**:
+   - Domain verification: `markVerificationAttemptForOrganization`
+     (`src/repositories/postgres/tenant-repository.ts`).
+   - Sitemap discovery: `persistSitemapDiscovery` — upserts every
+     discovered source and the `sitemap.discovery.completed` event
+     together (`src/repositories/postgres/sitemap-persistence-repository.ts`).
+   - Sitemap fetch: `persistSitemapFetch` — recursively persists every
+     nested sitemap source's final status, every discovered URL, and the
+     top-level source's own status, together with ONE
+     `sitemap.fetch.completed`/`failed` event for the whole operation
+     (same file). A fetch that fails at the network stage itself (before
+     any tree exists) uses `persistSitemapFetchFailure` — the source's
+     `failed` status and the `sitemap.fetch.failed` event still commit
+     together, in one transaction.
 
-**Documented limitation — sitemap discovery/fetch**: unlike domain
-verification (a single final mutation), sitemap discovery upserts each
-discovered source as it's found, and sitemap fetch can recurse into
-nested sitemap indexes with per-source `recordFetchResult` calls. Making
-every one of those writes atomic with one final audit row would require
-restructuring already-tested recursive fetch logic. For this checkpoint,
-`sitemap.discovery.*` and `sitemap.fetch.*` audit events are recorded as
-their own short writes around the network-heavy call (via
-`AuditService.record()` in the route handlers,
-`src/routes/organizations.ts`) — best-effort relative to the underlying
-per-source database writes, not one atomic transaction covering all of
-them. This is a deliberate, narrower guarantee than the fully atomic
-mutations above, not an oversight.
+If the final transaction's audit insert fails in any of these: every
+discovered-source upsert, every discovered-URL upsert, and the final
+status/count update in that same transaction roll back with it — the API
+call fails, and the client is never told the operation succeeded. The
+`started`/`attempted` event from step 1 is the only thing that can remain
+in that case (it already committed, in its own earlier transaction) —
+representing the fact that an operation was genuinely attempted, per the
+spec's explicit allowance for this. See
+`test/db/audit-durability.test.ts` for the forced-failure proof (source
+upserts roll back, discovered-URL upserts roll back, the source's final
+status update rolls back, no completed audit row remains, and the earlier
+started event is left as-is).
+
+Sitemap discovery/fetch's *network* phase respects every pre-existing
+limit unchanged: max discovered sources, max response bytes,
+decompressed-byte cap, max URLs per sitemap, per-domain URL total,
+recursion depth, and max nested sitemaps per index.
 
 **Best-effort (auth, never tenant-audited)**: `auth.login.success/failure`
 and `auth.logout` are structured-log + metrics only, with no transaction
@@ -179,16 +200,39 @@ first place.
 
 ## Metrics
 
-`prerender_audit_events_total{action,result}` — incremented inside
-`insertAuditEventRow()` itself, so every write path (transactional or
-standalone) is covered uniformly. Labels are the fixed `audit_action`/
-`audit_result` enum values only — never an id, hostname, URL, or request
-id. A metrics-increment failure is swallowed (see `src/lib/metrics.ts`'s
-`safe()`) and never affects the underlying transaction; conversely, an
-audit database failure on a transactionally-required mutation still rolls
-back that mutation regardless of whether the metrics increment itself
-succeeded — metrics reliability and audit durability are deliberately
-independent guarantees.
+`prerender_audit_events_total{action,result}` represents **committed
+audit rows only** — the increment happens strictly after the surrounding
+transaction has resolved, never from inside `insertAuditEventRow()`
+itself (that function is a pure insert with no metrics side effect at
+all). Two call sites own this timing:
+
+- `src/repositories/postgres/audit-repository.ts`'s
+  `runAuditedTransaction()` wraps every "mutation + audit in one
+  `db.transaction()`" call site (project/domain/api-key/invitation/
+  member/sitemap-persistence). It only increments `success` after
+  `db.transaction()` has resolved, and only increments `failure` (at most
+  once) if an audit insert was actually attempted before the rollback —
+  tracked via a `setAuditedAction()` callback invoked from inside the
+  transaction right before the insert, so a business-validation failure
+  that never reaches the audit insert (e.g. a slug conflict) increments
+  nothing at all.
+- `createPostgresAuditRepository()`'s `createAuditEvent()` (the
+  standalone-write path used by `AuditService.record()`) increments after
+  its single insert statement resolves — for a lone `INSERT`, "resolved"
+  already means "committed".
+
+Labels are the fixed `audit_action`/`audit_result` enum values only —
+never an id, hostname, URL, or request id. A metrics-client error is
+caught and dropped at both call sites above — it can never mask a real
+mutation error, never "un-succeed" an already-committed operation for the
+caller, and never itself cause a rollback. See
+`test/db/audit-durability.test.ts` for tests proving: a committed write
+increments success exactly once; a rollback after the audit insert was
+attempted increments failure at most once; a rollback that never reached
+the audit insert increments nothing; API key rotation (which touches two
+rows in one transaction) produces exactly one `api_key.rotated` metric
+call, not two; and a throwing metrics client never breaks or masks an
+already-committed mutation.
 
 ## Known gaps / not yet implemented
 

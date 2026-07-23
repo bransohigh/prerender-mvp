@@ -4,7 +4,7 @@ import { AppError } from '../lib/app-error.js';
 import { invitations, organization, member } from '../db/schema.js';
 import type { Database } from '../db/client.js';
 import type { Auth } from '../auth/auth.js';
-import { insertAuditEventRow } from '../repositories/postgres/audit-repository.js';
+import { insertAuditEventRow, runAuditedTransaction } from '../repositories/postgres/audit-repository.js';
 import { buildAuditMetadata } from '../lib/audit-events.js';
 import { createNoopMetrics, type Metrics } from '../lib/metrics.js';
 
@@ -55,7 +55,7 @@ export function createInvitationService(db: Database, metrics: Metrics = createN
     const tokenHash = hashInvitationToken(token);
     const expiresAt = new Date(Date.now() + INVITATION_TTL_MS);
 
-    const rowId = await db.transaction(async (tx) => {
+    const rowId = await runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
       const [row] = await tx
         .insert(invitations)
         .values({
@@ -69,6 +69,7 @@ export function createInvitationService(db: Database, metrics: Metrics = createN
         })
         .returning({ id: invitations.id });
 
+      setAuditedAction('organization.invitation.created');
       await insertAuditEventRow(tx, {
         organizationId: input.organizationId,
         actorUserId: input.invitedByUserId,
@@ -84,7 +85,7 @@ export function createInvitationService(db: Database, metrics: Metrics = createN
         // addresses beyond what the invitation-list endpoint already shows
         // to owner/admin. roleAfter records what was granted.
         metadata: buildAuditMetadata({ roleAfter: input.role }),
-      }, metrics);
+      });
 
       return row!.id;
     });
@@ -118,7 +119,7 @@ export function createInvitationService(db: Database, metrics: Metrics = createN
       throw new AppError('INVITATION_EXPIRED', 'Invitation has expired');
     }
 
-    return db.transaction(async (tx) => {
+    return runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
       // Re-check status inside the transaction: single-use is enforced by
       // the status flip below being the only path from pending -> accepted.
       const fresh = await tx.query.invitations.findFirst({ where: eq(invitations.id, match.id) });
@@ -168,6 +169,7 @@ export function createInvitationService(db: Database, metrics: Metrics = createN
         .set({ status: 'accepted', acceptedAt: new Date(), acceptedByUserId: userId })
         .where(eq(invitations.id, fresh.id));
 
+      setAuditedAction('organization.invitation.accepted');
       await insertAuditEventRow(tx, {
         organizationId: fresh.organizationId,
         actorUserId: userId,
@@ -179,7 +181,7 @@ export function createInvitationService(db: Database, metrics: Metrics = createN
         errorCode: null,
         requestId: input.requestId,
         metadata: buildAuditMetadata({ roleAfter: fresh.role }),
-      }, metrics);
+      });
 
       return { userId, organizationId: fresh.organizationId };
     });

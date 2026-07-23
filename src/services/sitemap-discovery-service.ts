@@ -3,7 +3,7 @@ import { safeFetch } from '../lib/safe-http-client.js';
 import type { UrlValidator } from '../types/render.js';
 import { extractSitemapDirectives } from '../lib/robots-parser.js';
 import { normalizeTargetUrl, InvalidTargetUrlError } from '../lib/url-normalize.js';
-import type { Domain, SitemapRepository, SitemapSource, SitemapSourceType } from '../repositories/types.js';
+import type { Domain, SitemapSourceType } from '../repositories/types.js';
 
 const MAX_DISCOVERED_SOURCES = 20;
 const ROBOTS_MAX_BYTES = 512 * 1024;
@@ -16,21 +16,30 @@ export interface SitemapDiscoveryOptions {
   fetchImpl?: typeof safeFetch;
 }
 
-export interface SitemapDiscoveryResult {
-  sources: SitemapSource[];
+export interface SitemapDiscoveryCandidate {
+  url: string;
+  normalizedUrl: string;
+  type: SitemapSourceType;
+}
+
+export interface SitemapDiscoveryScanResult {
+  candidates: SitemapDiscoveryCandidate[];
   robotsFound: boolean;
 }
 
-// Discovers sitemap source URLs for a verified domain: robots.txt Sitemap:
-// directives, plus the two conventional default locations. Only records
-// sources — actual sitemap XML fetch/parse happens separately via
-// POST /v1/sitemap-sources/:sourceId/fetch. Callers must have already
-// confirmed domain.status === 'verified'.
-export async function discoverSitemapSources(
+// Network-only: fetches robots.txt and derives candidate sitemap source
+// URLs (no database access at all). Checkpoint 3C-2 correction: this used
+// to upsert each candidate as it was found, interleaving network and
+// database work; it's now pure network+validation, and the caller
+// persists the result in one transaction — see
+// src/repositories/postgres/sitemap-persistence-repository.ts's
+// persistSitemapDiscovery(), which does that write plus the
+// sitemap.discovery.completed/failed audit event atomically. Callers must
+// have already confirmed domain.status === 'verified'.
+export async function scanForSitemapCandidates(
   domain: Domain,
-  sitemapRepository: SitemapRepository,
   options?: SitemapDiscoveryOptions,
-): Promise<SitemapDiscoveryResult> {
+): Promise<SitemapDiscoveryScanResult> {
   const candidateUrls = new Map<string, SitemapSourceType>();
   let robotsFound = false;
 
@@ -60,7 +69,7 @@ export async function discoverSitemapSources(
   candidateUrls.set(`https://${domain.normalizedHostname}/sitemap.xml`, 'sitemap');
   candidateUrls.set(`https://${domain.normalizedHostname}/sitemap_index.xml`, 'sitemap_index');
 
-  const sources: SitemapSource[] = [];
+  const candidates: SitemapDiscoveryCandidate[] = [];
   let count = 0;
   for (const [rawUrl, type] of candidateUrls) {
     if (count >= MAX_DISCOVERED_SOURCES) break;
@@ -73,17 +82,11 @@ export async function discoverSitemapSources(
       throw err;
     }
 
-    const source = await sitemapRepository.upsert({
-      domainId: domain.id,
-      url: rawUrl,
-      normalizedUrl: normalized.normalizedUrl,
-      type,
-    });
-    sources.push(source);
+    candidates.push({ url: rawUrl, normalizedUrl: normalized.normalizedUrl, type });
     count++;
   }
 
-  return { sources, robotsFound };
+  return { candidates, robotsFound };
 }
 
 export function assertDomainVerifiedForSitemap(domain: Domain | null): asserts domain is Domain {

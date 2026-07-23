@@ -11,7 +11,6 @@ import { createTenantRepository } from '../repositories/postgres/tenant-reposito
 import {
   createOrgScopedProjectRepository,
   createOrgScopedDomainRepository,
-  createOrgScopedSitemapRepository,
 } from '../repositories/postgres/tenant-scoped-adapters.js';
 import { createProjectService } from '../services/project-service.js';
 import { createDomainService, toPublicDomain } from '../services/domain-service.js';
@@ -20,9 +19,14 @@ import {
   createVerificationRateLimiter,
   createInFlightGuard,
 } from '../services/domain-verification-service.js';
-import { discoverSitemapSources, assertDomainVerifiedForSitemap } from '../services/sitemap-discovery-service.js';
-import { fetchAndParseSitemapSource } from '../services/sitemap-fetch-service.js';
+import { scanForSitemapCandidates, assertDomainVerifiedForSitemap } from '../services/sitemap-discovery-service.js';
+import { buildSitemapFetchTree, errorCodeFor, SITEMAP_FETCH_LIMITS } from '../services/sitemap-fetch-service.js';
 import { createPostgresDiscoveredUrlRepository } from '../repositories/postgres/postgres-discovered-url-repository.js';
+import {
+  persistSitemapDiscovery,
+  persistSitemapFetch,
+  persistSitemapFetchFailure,
+} from '../repositories/postgres/sitemap-persistence-repository.js';
 import { createOriginCheckHook } from '../lib/csrf.js';
 import { createNoopMetrics, type Metrics } from '../lib/metrics.js';
 import { createApiKeyRepository } from '../repositories/postgres/api-key-repository.js';
@@ -429,15 +433,13 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
         const domain = await tenant.getDomainForOrganization(ctx.organizationId, request.params.domainId);
         if (!domain) throw new AppError('DOMAIN_NOT_FOUND', 'Domain not found');
         assertDomainVerifiedForSitemap(domain);
-        const sitemapRepo = createOrgScopedSitemapRepository(tenant, ctx.organizationId, { actorUserId: ctx.userId, requestId: request.id });
-        // Started/completed/failed are recorded as their own short writes
-        // around the network-heavy discovery call, not held open across
-        // it — see AUDIT_LOGGING.md's two-stage network-operation section.
-        // Discovery upserts each discovered source as it goes rather than
-        // as a single final batch, so unlike project/domain/api-key/
-        // invitation mutations, these audit events are best-effort
-        // relative to those per-source writes rather than one atomic
-        // transaction covering all of them — documented, not hidden.
+        // Two-stage network-operation pattern (AUDIT_LOGGING.md): a short
+        // standalone `started` write, then pure network work (no DB
+        // access at all — see sitemap-discovery-service.ts), then ONE
+        // transaction that upserts every discovered source AND the final
+        // completed/failed audit event together (persistSitemapDiscovery
+        // in sitemap-persistence-repository.ts) — never held open across
+        // the network call, and never partially committed.
         await auditService.record({
           organizationId: ctx.organizationId,
           actor: { type: 'user', userId: ctx.userId },
@@ -447,10 +449,15 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
           result: 'success',
           requestId: request.id,
         });
-        let result;
+        let scan;
         try {
-          result = await discoverSitemapSources(domain, sitemapRepo, { proxyUrl: options.proxyUrl });
+          scan = await scanForSitemapCandidates(domain, { proxyUrl: options.proxyUrl });
         } catch (err) {
+          // Network phase itself threw (rare — scanForSitemapCandidates
+          // normally falls back to defaults on robots.txt failure): no
+          // database mutation was ever attempted, so a standalone
+          // (non-transactional) failed event is correct here — there is
+          // nothing to roll back.
           await auditService.record({
             organizationId: ctx.organizationId,
             actor: { type: 'user', userId: ctx.userId },
@@ -463,19 +470,16 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
           });
           throw err;
         }
-        await auditService.record({
+        const persisted = await persistSitemapDiscovery(db, metrics, {
           organizationId: ctx.organizationId,
-          actor: { type: 'user', userId: ctx.userId },
-          action: 'sitemap.discovery.completed',
-          targetType: 'domain',
-          targetId: domain.id,
-          result: 'success',
+          domainId: domain.id,
+          candidates: scan.candidates,
+          actorUserId: ctx.userId,
           requestId: request.id,
-          metadata: { discoveredCount: result.sources.length },
         });
         return reply.send({
-          sources: result.sources.map((s) => ({ id: s.id, url: s.url, type: s.type, status: s.status })),
-          robotsFound: result.robotsFound,
+          sources: persisted.map((s) => ({ id: s.id, url: s.url, type: s.type, status: s.status })),
+          robotsFound: scan.robotsFound,
         });
       } catch (err) {
         return sendAppError(err, reply, request.id);
@@ -612,12 +616,21 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
           throw new AppError('DOMAIN_NOT_VERIFIED', 'Domain must be verified before fetching sitemaps');
         }
 
-        // domain.id was just confirmed to belong to this organization above
-        // — the underlying discovered-url writes are keyed by that already
-        // -verified domainId, so the plain (non-tenant) discovered-url
-        // repository is safe to use here without re-deriving scope.
-        const sitemapRepo = createOrgScopedSitemapRepository(tenant, ctx.organizationId, { actorUserId: ctx.userId, requestId: request.id });
+        // Two-stage network-operation pattern (AUDIT_LOGGING.md): a short
+        // standalone `started` write, then pure network fetch/decompress/
+        // parse with no database access at all (buildSitemapFetchTree,
+        // src/services/sitemap-fetch-service.ts — recursion respects the
+        // existing maxIndexDepth/maxNestedSitemapsPerIndex/
+        // maxUrlsPerSitemap/maxDecompressedBytes/per-domain URL-total
+        // limits unchanged), then ONE transaction persists every
+        // discovered URL, every nested sitemap_source's final status, and
+        // the top-level source's own final status together with the
+        // completed/failed audit event (persistSitemapFetch /
+        // persistSitemapFetchFailure in
+        // sitemap-persistence-repository.ts) — never held open across the
+        // network call, and never partially committed.
         const discoveredUrlRepo = createPostgresDiscoveredUrlRepository(db);
+        const startedAt = Date.now();
         await auditService.record({
           organizationId: ctx.organizationId,
           actor: { type: 'user', userId: ctx.userId },
@@ -628,36 +641,44 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
           requestId: request.id,
           metadata: { sitemapType: source.type },
         });
-        let outcome;
+        let tree;
         try {
-          outcome = await fetchAndParseSitemapSource(domain, source, sitemapRepo, discoveredUrlRepo, {
-            proxyUrl: options.proxyUrl,
-            metrics,
-          });
+          const existingTotal = await discoveredUrlRepo.countByDomain(domain.id);
+          tree = await buildSitemapFetchTree(
+            domain,
+            source.normalizedUrl,
+            0,
+            { nestedCount: 0, remainingUrlBudget: Math.max(0, SITEMAP_FETCH_LIMITS.maxTotalUrlsPerDomain - existingTotal) },
+            { proxyUrl: options.proxyUrl },
+          );
         } catch (err) {
-          await auditService.record({
+          const errorCode = errorCodeFor(err);
+          await persistSitemapFetchFailure(db, metrics, {
             organizationId: ctx.organizationId,
-            actor: { type: 'user', userId: ctx.userId },
-            action: 'sitemap.fetch.failed',
-            targetType: 'sitemap_source',
-            targetId: source.id,
-            result: 'failure',
+            sourceId: source.id,
+            sourceType: source.type,
+            errorCode,
+            actorUserId: ctx.userId,
             requestId: request.id,
-            metadata: { sitemapType: source.type, reasonCode: isAppError(err) ? err.code : 'unknown' },
           });
-          throw err;
+          metrics.incrementSitemapFetch(source.type, 'failure');
+          metrics.observeSitemapFetchDuration((Date.now() - startedAt) / 1000);
+          if (err instanceof AppError) throw err;
+          throw new AppError('SITEMAP_FETCH_FAILED', `Sitemap fetch failed: ${errorCode}`);
         }
-        await auditService.record({
+        const persisted = await persistSitemapFetch(db, metrics, {
           organizationId: ctx.organizationId,
-          actor: { type: 'user', userId: ctx.userId },
-          action: 'sitemap.fetch.completed',
-          targetType: 'sitemap_source',
-          targetId: source.id,
-          result: 'success',
+          domainId: domain.id,
+          sourceId: source.id,
+          sourceType: source.type,
+          tree,
+          actorUserId: ctx.userId,
           requestId: request.id,
-          metadata: { sitemapType: source.type, discoveredCount: outcome.discoveredCount },
         });
-        return reply.send({ sitemapSourceId: source.id, discoveredCount: outcome.discoveredCount });
+        metrics.incrementSitemapFetch(source.type, 'success');
+        metrics.incrementSitemapUrlsDiscovered(persisted.discoveredCount);
+        metrics.observeSitemapFetchDuration((Date.now() - startedAt) / 1000);
+        return reply.send({ sitemapSourceId: source.id, discoveredCount: persisted.discoveredCount });
       } catch (err) {
         return sendAppError(err, reply, request.id);
       }

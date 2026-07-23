@@ -11,7 +11,7 @@ import {
   organization as organizationTable,
 } from '../../db/schema.js';
 import { AppError } from '../../lib/app-error.js';
-import { insertAuditEventRow } from './audit-repository.js';
+import { insertAuditEventRow, runAuditedTransaction } from './audit-repository.js';
 import { buildAuditMetadata } from '../../lib/audit-events.js';
 import { createNoopMetrics, type Metrics } from '../../lib/metrics.js';
 import type {
@@ -139,12 +139,13 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
       requestId: string | null,
     ): Promise<Project> {
       try {
-        return await db.transaction(async (tx) => {
+        return await runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
           const [row] = await tx
             .insert(projects)
             .values({ ...input, organizationId })
             .returning();
           const created = row as Project;
+          setAuditedAction('project.created');
           await insertAuditEventRow(tx, {
             organizationId,
             actorUserId,
@@ -156,7 +157,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
             errorCode: null,
             requestId,
             metadata: null,
-          }, metrics);
+          });
           return created;
         });
       } catch (err) {
@@ -201,7 +202,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
       requestId: string | null,
     ): Promise<Project | null> {
       try {
-        return await db.transaction(async (tx) => {
+        return await runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
           const [before] = await tx
             .select({ status: projects.status })
             .from(projects)
@@ -214,6 +215,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
             .returning();
           if (!row) return null;
           const updated = row as Project;
+          setAuditedAction('project.updated');
           await insertAuditEventRow(tx, {
             organizationId,
             actorUserId,
@@ -229,7 +231,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
                 ? { projectStatusBefore: before?.status, projectStatusAfter: updated.status }
                 : {},
             ),
-          }, metrics);
+          });
           return updated;
         });
       } catch (err) {
@@ -246,7 +248,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
       actorUserId: string,
       requestId: string | null,
     ): Promise<Project | null> {
-      return db.transaction(async (tx) => {
+      return runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
         const [before] = await tx
           .select({ status: projects.status })
           .from(projects)
@@ -259,6 +261,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
           .returning();
         if (!row) return null;
         const deleted = row as Project;
+        setAuditedAction('project.deleted');
         await insertAuditEventRow(tx, {
           organizationId,
           actorUserId,
@@ -270,7 +273,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
           errorCode: null,
           requestId,
           metadata: buildAuditMetadata({ projectStatusBefore: before?.status, projectStatusAfter: 'deleted' }),
-        }, metrics);
+        });
         return deleted;
       });
     },
@@ -291,7 +294,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
       // Verifying the project belongs to this org happens in the same
       // transaction as the insert, so a caller cannot attach a domain to
       // another tenant's project by guessing its id.
-      return db.transaction(async (tx) => {
+      return runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
         const [project] = await tx
           .select({ id: projects.id })
           .from(projects)
@@ -306,6 +309,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
             .values({ projectId, ...input })
             .returning();
           const created = row as Domain;
+          setAuditedAction('domain.created');
           await insertAuditEventRow(tx, {
             organizationId,
             actorUserId,
@@ -317,7 +321,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
             errorCode: null,
             requestId,
             metadata: buildAuditMetadata({ verificationMethod: input.verificationMethod }),
-          }, metrics);
+          });
           return created;
         } catch (err) {
           if (isUniqueViolation(err)) {
@@ -360,7 +364,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
       const existing = await getDomainForOrganization(organizationId, domainId);
       if (!existing) return null;
       const wasVerified = existing.status === 'verified';
-      return db.transaction(async (tx) => {
+      return runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
         const [row] = await tx
           .update(domains)
           .set({
@@ -372,6 +376,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
           .where(eq(domains.id, domainId))
           .returning();
         if (!row) return null;
+        setAuditedAction('domain.verification_token.rotated');
         await insertAuditEventRow(tx, {
           organizationId,
           actorUserId,
@@ -383,7 +388,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
           errorCode: null,
           requestId,
           metadata: buildAuditMetadata({ verificationMethod: existing.verificationMethod }),
-        }, metrics);
+        });
         return row as Domain;
       });
     },
@@ -407,7 +412,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
       const existing = await getDomainForOrganization(organizationId, domainId);
       if (!existing) return null;
       const now = new Date();
-      return db.transaction(async (tx) => {
+      return runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
         let row: typeof domains.$inferSelect | undefined;
         if (result.success) {
           [row] = await tx
@@ -428,11 +433,13 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
             .returning();
         }
         if (!row) return null;
+        const action = result.success ? 'domain.verification.succeeded' : 'domain.verification.failed';
+        setAuditedAction(action);
         await insertAuditEventRow(tx, {
           organizationId,
           actorUserId,
           actorApiKeyId: null,
-          action: result.success ? 'domain.verification.succeeded' : 'domain.verification.failed',
+          action,
           targetType: 'domain',
           targetId: domainId,
           result: 'success',
@@ -442,7 +449,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
             verificationMethod: existing.verificationMethod,
             reasonCode: result.success ? undefined : result.failureCode,
           }),
-        }, metrics);
+        });
         return row as Domain;
       });
     },
@@ -593,8 +600,9 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
       });
       if (!existing) return null;
       const roleBefore = existing.role;
-      await db.transaction(async (tx) => {
+      await runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
         await tx.update(memberTable).set({ role }).where(eq(memberTable.id, memberId));
+        setAuditedAction('organization.member.role_changed');
         await insertAuditEventRow(tx, {
           organizationId,
           actorUserId,
@@ -606,7 +614,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
           errorCode: null,
           requestId,
           metadata: buildAuditMetadata({ roleBefore, roleAfter: role }),
-        }, metrics);
+        });
       });
       const rows = await db
         .select({
@@ -634,8 +642,9 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
         where: and(eq(memberTable.id, memberId), eq(memberTable.organizationId, organizationId)),
       });
       if (!existing) return 'not_found';
-      await db.transaction(async (tx) => {
+      await runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
         await tx.delete(memberTable).where(eq(memberTable.id, memberId));
+        setAuditedAction('organization.member.removed');
         await insertAuditEventRow(tx, {
           organizationId,
           actorUserId,
@@ -647,7 +656,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
           errorCode: null,
           requestId,
           metadata: buildAuditMetadata({ roleBefore: existing.role }),
-        }, metrics);
+        });
       });
       return 'removed';
     },
@@ -694,11 +703,12 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
       });
       if (!existing) return 'not_found';
       if (existing.status !== 'pending') return 'already_used';
-      await db.transaction(async (tx) => {
+      await runAuditedTransaction(db, metrics, async (tx, setAuditedAction) => {
         await tx
           .update(invitations)
           .set({ status: 'revoked', updatedAt: new Date() })
           .where(and(eq(invitations.id, invitationId), eq(invitations.status, 'pending')));
+        setAuditedAction('organization.invitation.cancelled');
         await insertAuditEventRow(tx, {
           organizationId,
           actorUserId,
@@ -710,7 +720,7 @@ export function createTenantRepository(db: Database, metrics: Metrics = createNo
           errorCode: null,
           requestId,
           metadata: null,
-        }, metrics);
+        });
       });
       return 'cancelled';
     },
