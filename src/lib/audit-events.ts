@@ -94,3 +94,38 @@ export function resolveActorFields(actor: AuditActor): ActorFields {
       return { actorUserId: null, actorApiKeyId: null };
   }
 }
+
+export type AuditActorType = 'user' | 'api_key' | 'system';
+
+export class AuditActorConsistencyError extends Error {}
+
+// Read-path check on a stored row: a row with BOTH actor ids set is a data
+// integrity violation (never producible via resolveActorFields on the
+// write path, so this only fires on drift — a manual DB edit, a future
+// bug, or a legacy row) — never silently pass such a row through as if it
+// belonged to one identifiable actor.
+export function deriveActorType(fields: ActorFields): AuditActorType {
+  if (fields.actorUserId && fields.actorApiKeyId) {
+    throw new AuditActorConsistencyError('Audit row has both actorUserId and actorApiKeyId set');
+  }
+  if (fields.actorUserId) return 'user';
+  if (fields.actorApiKeyId) return 'api_key';
+  return 'system';
+}
+
+// Read-path metadata sanitizer: unlike buildAuditMetadata (write path,
+// fails closed by throwing), this NEVER throws — a malformed or legacy
+// metadata blob must not break the audit list endpoint for every other
+// row. Unknown keys/non-primitive values/oversized strings are silently
+// dropped; a fully malformed value yields an empty object.
+export function sanitizeStoredMetadata(raw: unknown): Record<string, AuditMetadataValue> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {};
+  const out: Record<string, AuditMetadataValue> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!ALLOWED_METADATA_KEYS.has(key)) continue;
+    if (value !== null && typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') continue;
+    if (typeof value === 'string' && value.length > 500) continue;
+    out[key] = value;
+  }
+  return out;
+}

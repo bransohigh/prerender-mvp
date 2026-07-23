@@ -21,28 +21,55 @@ import type {
 // (used only by the legacy unscoped routes, now 410) and are intentionally
 // not reachable through these adapters — they throw if called.
 
-export function createOrgScopedProjectRepository(tenant: TenantRepository, organizationId: string): ProjectRepository {
+// Actor identity for the audit trail — bound once at adapter-creation time
+// (organizations.ts constructs a fresh adapter per request with the
+// authenticated session's userId + that request's id) rather than threaded
+// through every ProjectRepository/DomainRepository/SitemapRepository call,
+// since those generic interfaces are shared with the legacy (now-410,
+// non-audited) routes and their fake in-memory test implementations.
+export interface AuditActorContext {
+  actorUserId: string;
+  requestId: string | null;
+}
+
+export function createOrgScopedProjectRepository(
+  tenant: TenantRepository,
+  organizationId: string,
+  actor: AuditActorContext,
+): ProjectRepository {
   return {
-    create: (input: CreateProjectInput) => tenant.createProjectForOrganization(organizationId, input),
+    create: (input: CreateProjectInput) => tenant.createProjectForOrganization(organizationId, input, actor.actorUserId, actor.requestId),
     findById: (id: string) => tenant.getProjectForOrganization(organizationId, id),
     findBySlug: () => {
       throw new Error('findBySlug is not available on the organization-scoped project repository');
     },
     list: (options) => tenant.listProjectsForOrganization(organizationId, options),
-    update: (id: string, input: UpdateProjectInput) => tenant.updateProjectForOrganization(organizationId, id, input),
-    softDeleteWithCascade: (id: string) => tenant.softDeleteProjectForOrganization(organizationId, id),
+    update: (id: string, input: UpdateProjectInput) =>
+      tenant.updateProjectForOrganization(organizationId, id, input, actor.actorUserId, actor.requestId),
+    softDeleteWithCascade: (id: string) =>
+      tenant.softDeleteProjectForOrganization(organizationId, id, actor.actorUserId, actor.requestId),
   };
 }
 
-export function createOrgScopedDomainRepository(tenant: TenantRepository, organizationId: string): DomainRepository {
+export function createOrgScopedDomainRepository(
+  tenant: TenantRepository,
+  organizationId: string,
+  actor: AuditActorContext,
+): DomainRepository {
   return {
     create: (input: CreateDomainInput) =>
-      tenant.createDomainForOrganization(organizationId, input.projectId, {
-        hostname: input.hostname,
-        normalizedHostname: input.normalizedHostname,
-        verificationMethod: input.verificationMethod,
-        verificationTokenHash: input.verificationTokenHash,
-      }),
+      tenant.createDomainForOrganization(
+        organizationId,
+        input.projectId,
+        {
+          hostname: input.hostname,
+          normalizedHostname: input.normalizedHostname,
+          verificationMethod: input.verificationMethod,
+          verificationTokenHash: input.verificationTokenHash,
+        },
+        actor.actorUserId,
+        actor.requestId,
+      ),
     findById: (id: string) => tenant.getDomainForOrganization(organizationId, id),
     findByNormalizedHostname: () => {
       throw new Error('findByNormalizedHostname is not available on the organization-scoped domain repository');
@@ -50,13 +77,22 @@ export function createOrgScopedDomainRepository(tenant: TenantRepository, organi
     listByProject: (projectId: string, options) =>
       tenant.listDomainsForOrganizationProject(organizationId, projectId, options),
     rotateVerificationToken: (id: string, newTokenHash: string) =>
-      tenant.rotateVerificationTokenForOrganization(organizationId, id, newTokenHash),
+      tenant.rotateVerificationTokenForOrganization(organizationId, id, newTokenHash, actor.actorUserId, actor.requestId),
     markVerificationAttempt: (id, result) =>
-      tenant.markVerificationAttemptForOrganization(organizationId, id, result),
+      tenant.markVerificationAttemptForOrganization(organizationId, id, result, actor.actorUserId, actor.requestId),
   };
 }
 
-export function createOrgScopedSitemapRepository(tenant: TenantRepository, organizationId: string): SitemapRepository {
+// actor is accepted (not internally used yet) for signature consistency
+// with the project/domain adapters above — sitemap discovery/fetch audit
+// events are recorded by the route handlers directly via AuditService
+// (see AUDIT_LOGGING.md), not inside these per-source upsert/record calls.
+export function createOrgScopedSitemapRepository(
+  tenant: TenantRepository,
+  organizationId: string,
+  actor: AuditActorContext,
+): SitemapRepository {
+  void actor;
   return {
     upsert: (input) => {
       // domainId scoping is enforced inside upsertSitemapSourceForOrganization

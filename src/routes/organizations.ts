@@ -27,6 +27,10 @@ import { createOriginCheckHook } from '../lib/csrf.js';
 import { createNoopMetrics, type Metrics } from '../lib/metrics.js';
 import { createApiKeyRepository } from '../repositories/postgres/api-key-repository.js';
 import { createApiKeyService } from '../services/api-key-service.js';
+import { createPostgresAuditRepository } from '../repositories/postgres/audit-repository.js';
+import { createAuditService, InvalidAuditCursorError } from '../services/audit-service.js';
+import { auditActionEnum, auditResultEnum } from '../db/schema.js';
+import { sanitizeStoredMetadata, deriveActorType, AuditActorConsistencyError } from '../lib/audit-events.js';
 
 const createInvitationSchema = z.object({
   email: z.string().email().max(320),
@@ -63,6 +67,17 @@ const listQuerySchema = z.object({
   cursor: z.string().uuid().optional(),
 });
 
+// Fixed, validated target types only — never an arbitrary caller string.
+const AUDIT_TARGET_TYPES = ['api_key', 'invitation', 'member', 'project', 'domain', 'sitemap_source'] as const;
+
+const listAuditEventsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().min(1).max(200).optional(),
+  action: z.enum(auditActionEnum.enumValues).optional(),
+  result: z.enum(auditResultEnum.enumValues).optional(),
+  targetType: z.enum(AUDIT_TARGET_TYPES).optional(),
+});
+
 export interface OrganizationRoutesOptions {
   auth: Auth;
   db: Database;
@@ -88,9 +103,11 @@ function sendAppError(err: unknown, reply: FastifyReply, requestId: string) {
 export async function organizationRoutes(app: FastifyInstance, options: OrganizationRoutesOptions): Promise<void> {
   const { auth, db, invitationService } = options;
   const metrics = options.metrics ?? createNoopMetrics();
-  const tenant = createTenantRepository(db);
-  const apiKeyRepo = createApiKeyRepository(db);
+  const tenant = createTenantRepository(db, metrics);
+  const apiKeyRepo = createApiKeyRepository(db, metrics);
   const apiKeyService = createApiKeyService(tenant, apiKeyRepo);
+  const auditRepo = createPostgresAuditRepository(db, metrics);
+  const auditService = createAuditService(auditRepo);
   const rateLimiter = createVerificationRateLimiter();
   const inFlightGuard = createInFlightGuard();
 
@@ -142,6 +159,72 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
     }
   });
 
+  // ---- audit history ------------------------------------------------------
+  // Owner/admin only (audit.read permission — see src/auth/permissions.ts);
+  // member gets 403 FORBIDDEN_ROLE, a non-member gets 404
+  // ORGANIZATION_NOT_FOUND, via requireOrganizationPermission. Never
+  // reachable with a project render API key or any legacy global key —
+  // this whole plugin scope is cookie-session-only (see app.ts).
+  app.get<{ Params: { organizationId: string } }>('/organizations/:organizationId/audit-events', async (request, reply) => {
+    try {
+      const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'audit.read', metrics);
+      const parsed = listAuditEventsQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        request.log.info({ event: 'audit.read.denied', errorCode: 'invalid_request' }, 'audit read denied');
+        return reply.code(400).send({ error: 'invalid_request', details: parsed.error.flatten(), requestId: request.id });
+      }
+      let page;
+      try {
+        page = await auditService.list({
+          organizationId: ctx.organizationId,
+          limit: parsed.data.limit,
+          cursor: parsed.data.cursor ?? null,
+          action: parsed.data.action,
+          result: parsed.data.result,
+          targetType: parsed.data.targetType,
+        });
+      } catch (err) {
+        if (err instanceof InvalidAuditCursorError) {
+          return reply.code(400).send({ error: 'invalid_cursor', message: 'Malformed cursor', requestId: request.id });
+        }
+        throw err;
+      }
+
+      const items = [];
+      for (const row of page.items) {
+        let actorType;
+        try {
+          actorType = deriveActorType({ actorUserId: row.actorUserId, actorApiKeyId: row.actorApiKeyId });
+        } catch (err) {
+          if (err instanceof AuditActorConsistencyError) {
+            request.log.error({ event: 'audit.read.denied', errorCode: 'actor_consistency', targetType: row.targetType, targetId: row.targetId }, 'audit row skipped: actor consistency violation');
+            continue;
+          }
+          throw err;
+        }
+        items.push({
+          id: row.id,
+          action: row.action,
+          result: row.result,
+          actorType,
+          actorUserId: row.actorUserId,
+          actorApiKeyId: row.actorApiKeyId,
+          targetType: row.targetType,
+          targetId: row.targetId,
+          errorCode: row.errorCode,
+          requestId: row.requestId,
+          metadata: sanitizeStoredMetadata(row.metadata),
+          createdAt: row.createdAt.toISOString(),
+        });
+      }
+
+      request.log.info({ event: 'audit.read.success', organizationId: ctx.organizationId, count: items.length }, 'audit read');
+      return reply.send({ items, nextCursor: page.nextCursor });
+    } catch (err) {
+      return sendAppError(err, reply, request.id);
+    }
+  });
+
   // ---- projects ---------------------------------------------------------
   app.post<{ Params: { organizationId: string } }>('/organizations/:organizationId/projects', async (request, reply) => {
     try {
@@ -150,7 +233,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
       if (!parsed.success) {
         return reply.code(400).send({ error: 'invalid_request', details: parsed.error.flatten(), requestId: request.id });
       }
-      const projectRepo = createOrgScopedProjectRepository(tenant, ctx.organizationId);
+      const projectRepo = createOrgScopedProjectRepository(tenant, ctx.organizationId, { actorUserId: ctx.userId, requestId: request.id });
       const projectService = createProjectService(projectRepo);
       const project = await projectService.createProject(parsed.data);
       return reply.code(201).send(project);
@@ -196,7 +279,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
         if (!parsed.success) {
           return reply.code(400).send({ error: 'invalid_request', details: parsed.error.flatten(), requestId: request.id });
         }
-        const updated = await tenant.updateProjectForOrganization(ctx.organizationId, request.params.projectId, parsed.data);
+        const updated = await tenant.updateProjectForOrganization(ctx.organizationId, request.params.projectId, parsed.data, ctx.userId, request.id);
         if (!updated) throw new AppError('PROJECT_NOT_FOUND', 'Project not found');
         return reply.send(updated);
       } catch (err) {
@@ -210,7 +293,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
     async (request, reply) => {
       try {
         const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'project.delete', metrics);
-        const deleted = await tenant.softDeleteProjectForOrganization(ctx.organizationId, request.params.projectId);
+        const deleted = await tenant.softDeleteProjectForOrganization(ctx.organizationId, request.params.projectId, ctx.userId, request.id);
         if (!deleted) throw new AppError('PROJECT_NOT_FOUND', 'Project not found');
         return reply.send(deleted);
       } catch (err) {
@@ -232,7 +315,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
         const project = await tenant.getProjectForOrganization(ctx.organizationId, request.params.projectId);
         if (!project) throw new AppError('PROJECT_NOT_FOUND', 'Project not found');
 
-        const domainRepo = createOrgScopedDomainRepository(tenant, ctx.organizationId);
+        const domainRepo = createOrgScopedDomainRepository(tenant, ctx.organizationId, { actorUserId: ctx.userId, requestId: request.id });
         const domainService = createDomainService(domainRepo);
         const result = await domainService.createDomain({
           projectId: project.id,
@@ -290,7 +373,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
     async (request, reply) => {
       try {
         const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'domain.rotate_token', metrics);
-        const domainRepo = createOrgScopedDomainRepository(tenant, ctx.organizationId);
+        const domainRepo = createOrgScopedDomainRepository(tenant, ctx.organizationId, { actorUserId: ctx.userId, requestId: request.id });
         const domainService = createDomainService(domainRepo);
         const result = await domainService.rotateToken(request.params.domainId);
         return reply.send({
@@ -310,7 +393,26 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
         const ctx = await requireOrganizationPermission(request, auth, db, request.params.organizationId, 'domain.verify', metrics);
         const domain = await tenant.getDomainForOrganization(ctx.organizationId, request.params.domainId);
         if (!domain) throw new AppError('DOMAIN_NOT_FOUND', 'Domain not found');
-        const domainRepo = createOrgScopedDomainRepository(tenant, ctx.organizationId);
+        // Two-stage network-operation pattern (AUDIT_LOGGING.md): a short,
+        // standalone "attempted" write happens here BEFORE any DNS/HTTP
+        // work starts — if it throws, verification never starts. The
+        // succeeded/failed outcome is written atomically together with
+        // the final domain state inside
+        // markVerificationAttemptForOrganization's own transaction (see
+        // tenant-repository.ts), reached via verifyDomainOrThrow below —
+        // never with a database transaction held open across the network
+        // call itself.
+        await auditService.record({
+          organizationId: ctx.organizationId,
+          actor: { type: 'user', userId: ctx.userId },
+          action: 'domain.verification.attempted',
+          targetType: 'domain',
+          targetId: domain.id,
+          result: 'success',
+          requestId: request.id,
+          metadata: { verificationMethod: domain.verificationMethod },
+        });
+        const domainRepo = createOrgScopedDomainRepository(tenant, ctx.organizationId, { actorUserId: ctx.userId, requestId: request.id });
         const verified = await verifyDomainOrThrow(domain, domainRepo, rateLimiter, inFlightGuard, { proxyUrl: options.proxyUrl }, metrics);
         return reply.send(toPublicDomain(verified));
       } catch (err) {
@@ -327,8 +429,50 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
         const domain = await tenant.getDomainForOrganization(ctx.organizationId, request.params.domainId);
         if (!domain) throw new AppError('DOMAIN_NOT_FOUND', 'Domain not found');
         assertDomainVerifiedForSitemap(domain);
-        const sitemapRepo = createOrgScopedSitemapRepository(tenant, ctx.organizationId);
-        const result = await discoverSitemapSources(domain, sitemapRepo, { proxyUrl: options.proxyUrl });
+        const sitemapRepo = createOrgScopedSitemapRepository(tenant, ctx.organizationId, { actorUserId: ctx.userId, requestId: request.id });
+        // Started/completed/failed are recorded as their own short writes
+        // around the network-heavy discovery call, not held open across
+        // it — see AUDIT_LOGGING.md's two-stage network-operation section.
+        // Discovery upserts each discovered source as it goes rather than
+        // as a single final batch, so unlike project/domain/api-key/
+        // invitation mutations, these audit events are best-effort
+        // relative to those per-source writes rather than one atomic
+        // transaction covering all of them — documented, not hidden.
+        await auditService.record({
+          organizationId: ctx.organizationId,
+          actor: { type: 'user', userId: ctx.userId },
+          action: 'sitemap.discovery.started',
+          targetType: 'domain',
+          targetId: domain.id,
+          result: 'success',
+          requestId: request.id,
+        });
+        let result;
+        try {
+          result = await discoverSitemapSources(domain, sitemapRepo, { proxyUrl: options.proxyUrl });
+        } catch (err) {
+          await auditService.record({
+            organizationId: ctx.organizationId,
+            actor: { type: 'user', userId: ctx.userId },
+            action: 'sitemap.discovery.failed',
+            targetType: 'domain',
+            targetId: domain.id,
+            result: 'failure',
+            requestId: request.id,
+            metadata: { reasonCode: isAppError(err) ? err.code : 'unknown' },
+          });
+          throw err;
+        }
+        await auditService.record({
+          organizationId: ctx.organizationId,
+          actor: { type: 'user', userId: ctx.userId },
+          action: 'sitemap.discovery.completed',
+          targetType: 'domain',
+          targetId: domain.id,
+          result: 'success',
+          requestId: request.id,
+          metadata: { discoveredCount: result.sources.length },
+        });
         return reply.send({
           sources: result.sources.map((s) => ({ id: s.id, url: s.url, type: s.type, status: s.status })),
           robotsFound: result.robotsFound,
@@ -472,11 +616,46 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
         // — the underlying discovered-url writes are keyed by that already
         // -verified domainId, so the plain (non-tenant) discovered-url
         // repository is safe to use here without re-deriving scope.
-        const sitemapRepo = createOrgScopedSitemapRepository(tenant, ctx.organizationId);
+        const sitemapRepo = createOrgScopedSitemapRepository(tenant, ctx.organizationId, { actorUserId: ctx.userId, requestId: request.id });
         const discoveredUrlRepo = createPostgresDiscoveredUrlRepository(db);
-        const outcome = await fetchAndParseSitemapSource(domain, source, sitemapRepo, discoveredUrlRepo, {
-          proxyUrl: options.proxyUrl,
-          metrics,
+        await auditService.record({
+          organizationId: ctx.organizationId,
+          actor: { type: 'user', userId: ctx.userId },
+          action: 'sitemap.fetch.started',
+          targetType: 'sitemap_source',
+          targetId: source.id,
+          result: 'success',
+          requestId: request.id,
+          metadata: { sitemapType: source.type },
+        });
+        let outcome;
+        try {
+          outcome = await fetchAndParseSitemapSource(domain, source, sitemapRepo, discoveredUrlRepo, {
+            proxyUrl: options.proxyUrl,
+            metrics,
+          });
+        } catch (err) {
+          await auditService.record({
+            organizationId: ctx.organizationId,
+            actor: { type: 'user', userId: ctx.userId },
+            action: 'sitemap.fetch.failed',
+            targetType: 'sitemap_source',
+            targetId: source.id,
+            result: 'failure',
+            requestId: request.id,
+            metadata: { sitemapType: source.type, reasonCode: isAppError(err) ? err.code : 'unknown' },
+          });
+          throw err;
+        }
+        await auditService.record({
+          organizationId: ctx.organizationId,
+          actor: { type: 'user', userId: ctx.userId },
+          action: 'sitemap.fetch.completed',
+          targetType: 'sitemap_source',
+          targetId: source.id,
+          result: 'success',
+          requestId: request.id,
+          metadata: { sitemapType: source.type, discoveredCount: outcome.discoveredCount },
         });
         return reply.send({ sitemapSourceId: source.id, discoveredCount: outcome.discoveredCount });
       } catch (err) {

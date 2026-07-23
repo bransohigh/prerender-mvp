@@ -120,6 +120,18 @@ noktası (`render-capacity.ts`, `renderer.ts`, `browser-launch.ts`,
 enjekte edilen bir `Metrics` implementasyonu throw etse bile render isteği
 etkilenmez.
 
+## Audit logging (Checkpoint 3C)
+
+`prerender_audit_events_total{action,result}` counts tenant audit writes
+(fixed enum labels only). Pre-tenant authentication events
+(`auth.login.success`/`auth.login.failure`/`auth.logout`) are separate —
+`prerender_auth_security_events_total{event}` plus a stable structured-log
+line, never a database row (no `organizationId` exists yet at login time).
+CSRF rejections use `prerender_csrf_rejections_total{reason}`. See
+[AUDIT_LOGGING.md](AUDIT_LOGGING.md) for the full design, including which
+mutations are audited transactionally vs. best-effort, and the metadata
+allowlist that keeps secrets out of both the audit table and these logs.
+
 ## Structured logging
 
 Fastify'nin yerleşik Pino logger'ı kullanılır (ek bir logging framework

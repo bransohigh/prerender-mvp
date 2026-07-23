@@ -6,6 +6,7 @@ import type { Database } from '../db/client.js';
 import type { Auth } from '../auth/auth.js';
 import { insertAuditEventRow } from '../repositories/postgres/audit-repository.js';
 import { buildAuditMetadata } from '../lib/audit-events.js';
+import { createNoopMetrics, type Metrics } from '../lib/metrics.js';
 
 const INVITATION_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -41,7 +42,7 @@ export interface CreateInvitationResult {
   expiresAt: Date;
 }
 
-export function createInvitationService(db: Database) {
+export function createInvitationService(db: Database, metrics: Metrics = createNoopMetrics()) {
   async function createInvitation(input: CreateInvitationInput): Promise<CreateInvitationResult> {
     const org = await db.query.organization.findFirst({
       where: eq(organization.id, input.organizationId),
@@ -83,7 +84,7 @@ export function createInvitationService(db: Database) {
         // addresses beyond what the invitation-list endpoint already shows
         // to owner/admin. roleAfter records what was granted.
         metadata: buildAuditMetadata({ roleAfter: input.role }),
-      });
+      }, metrics);
 
       return row!.id;
     });
@@ -178,7 +179,7 @@ export function createInvitationService(db: Database) {
         errorCode: null,
         requestId: input.requestId,
         metadata: buildAuditMetadata({ roleAfter: fresh.role }),
-      });
+      }, metrics);
 
       return { userId, organizationId: fresh.organizationId };
     });

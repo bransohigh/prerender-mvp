@@ -228,7 +228,7 @@ describe('audit_events: transactional wiring', () => {
     await app.inject({ method: 'POST', url: `/v1/organizations/${b.organizationId}/projects/${projectB.id}/api-keys`, headers: { cookie: b.ownerCookie, origin: TRUSTED_ORIGIN }, payload: { name: 'KB1' } });
 
     const repo = createPostgresAuditRepository(dbClient.db);
-    const aRows = await repo.listAuditEventsForOrganization({ organizationId: a.organizationId, limit: 50 });
+    const aRows = await repo.listAuditEventsForOrganization({ organizationId: a.organizationId, action: 'api_key.created', limit: 50 });
     expect(aRows).toHaveLength(2);
     expect(aRows.every((r) => r.organizationId === a.organizationId)).toBe(true);
     // createdAt DESC, id DESC
@@ -238,7 +238,7 @@ describe('audit_events: transactional wiring', () => {
       expect(prev.createdAt.getTime() >= curr.createdAt.getTime()).toBe(true);
     }
 
-    const bRows = await repo.listAuditEventsForOrganization({ organizationId: b.organizationId, limit: 50 });
+    const bRows = await repo.listAuditEventsForOrganization({ organizationId: b.organizationId, action: 'api_key.created', limit: 50 });
     expect(bRows).toHaveLength(1);
     expect(bRows[0]!.organizationId).toBe(b.organizationId);
   });

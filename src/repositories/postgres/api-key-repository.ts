@@ -5,6 +5,7 @@ import { apikey } from '../../db/schema.js';
 import type { Database } from '../../db/client.js';
 import { insertAuditEventRow } from './audit-repository.js';
 import { buildAuditMetadata } from '../../lib/audit-events.js';
+import { createNoopMetrics, type Metrics } from '../../lib/metrics.js';
 
 // Direct, organization+project-scoped access to Better Auth's `apikey`
 // table (configured with `references: 'organization'` in src/auth/auth.ts,
@@ -156,7 +157,7 @@ export type RotateApiKeyResult =
   | { outcome: 'already_rotated' }
   | { outcome: 'expired' };
 
-export function createApiKeyRepository(db: Database) {
+export function createApiKeyRepository(db: Database, metrics: Metrics = createNoopMetrics()) {
   async function getApiKeyForProject(organizationId: string, projectId: string, keyId: string): Promise<ApiKeyRow | null> {
     const [row] = await db
       .select()
@@ -225,7 +226,7 @@ export function createApiKeyRepository(db: Database) {
           errorCode: null,
           requestId: params.requestId,
           metadata: buildAuditMetadata({ apiKeyName: params.name, apiKeyPrefix: params.prefix }),
-        });
+        }, metrics);
 
         return { ...created, key: plaintext };
       });
@@ -266,7 +267,7 @@ export function createApiKeyRepository(db: Database) {
             apiKeyName: existing.name ?? undefined,
             apiKeyPrefix: existing.prefix ?? undefined,
           }),
-        });
+        }, metrics);
       });
       return true;
     },
@@ -369,7 +370,7 @@ export function createApiKeyRepository(db: Database) {
           errorCode: null,
           requestId: params.requestId,
           metadata: buildAuditMetadata({ apiKeyName: params.name, apiKeyPrefix: params.prefix }),
-        });
+        }, metrics);
 
         return {
           outcome: 'rotated',

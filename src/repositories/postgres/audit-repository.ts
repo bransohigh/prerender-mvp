@@ -1,6 +1,7 @@
 import { and, desc, eq, lt, or } from 'drizzle-orm';
 import type { Database } from '../../db/client.js';
 import { auditEvents } from '../../db/schema.js';
+import { createNoopMetrics, type Metrics } from '../../lib/metrics.js';
 import type {
   AuditRepository,
   AuditEventRow,
@@ -32,32 +33,46 @@ function toRow(row: typeof auditEvents.$inferSelect): AuditEventRow {
 // This is how the transactional-pairing requirement (mutation + audit
 // commit together, or neither does) is satisfied without a nested/second
 // transaction.
-export async function insertAuditEventRow(executor: Database, input: CreateAuditEventInput): Promise<AuditEventRow> {
-  const [row] = await executor
-    .insert(auditEvents)
-    .values({
-      organizationId: input.organizationId,
-      actorUserId: input.actorUserId,
-      actorApiKeyId: input.actorApiKeyId,
-      action: input.action,
-      targetType: input.targetType,
-      targetId: input.targetId,
-      result: input.result,
-      errorCode: input.errorCode,
-      requestId: input.requestId,
-      metadata: input.metadata,
-    })
-    .returning();
-  if (!row) {
-    throw new Error('Audit event insert returned no row');
+export async function insertAuditEventRow(
+  executor: Database,
+  input: CreateAuditEventInput,
+  metrics: Metrics = createNoopMetrics(),
+): Promise<AuditEventRow> {
+  try {
+    const [row] = await executor
+      .insert(auditEvents)
+      .values({
+        organizationId: input.organizationId,
+        actorUserId: input.actorUserId,
+        actorApiKeyId: input.actorApiKeyId,
+        action: input.action,
+        targetType: input.targetType,
+        targetId: input.targetId,
+        result: input.result,
+        errorCode: input.errorCode,
+        requestId: input.requestId,
+        metadata: input.metadata,
+      })
+      .returning();
+    if (!row) {
+      throw new Error('Audit event insert returned no row');
+    }
+    // Metrics reflect the audit write itself, not the paired mutation — a
+    // metrics.incrementAuditEvent failure is swallowed by Metrics'
+    // implementation (see src/lib/metrics.ts's safe()) and never affects
+    // the transaction this insert may be part of.
+    metrics.incrementAuditEvent(input.action, 'success');
+    return toRow(row);
+  } catch (err) {
+    metrics.incrementAuditEvent(input.action, 'failure');
+    throw err;
   }
-  return toRow(row);
 }
 
-export function createPostgresAuditRepository(db: Database): AuditRepository {
+export function createPostgresAuditRepository(db: Database, metrics: Metrics = createNoopMetrics()): AuditRepository {
   return {
     async createAuditEvent(input: CreateAuditEventInput): Promise<AuditEventRow> {
-      return insertAuditEventRow(db, input);
+      return insertAuditEventRow(db, input, metrics);
     },
 
     async listAuditEventsForOrganization(params: ListAuditEventsForOrganizationParams): Promise<AuditEventRow[]> {

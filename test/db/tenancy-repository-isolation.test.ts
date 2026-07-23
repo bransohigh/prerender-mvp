@@ -53,13 +53,13 @@ async function createOrgWithProjectAndDomain(label: string): Promise<OrgFixture>
     });
   }
 
-  const project = await tenant.createProjectForOrganization(org.id, { name: `Project ${label}`, slug: `project-${label}-${Date.now()}` });
+  const project = await tenant.createProjectForOrganization(org.id, { name: `Project ${label}`, slug: `project-${label}-${Date.now()}` }, signUp.user.id, null);
   const domain = await tenant.createDomainForOrganization(org.id, project.id, {
     hostname: `${label}.example.com`,
     normalizedHostname: `${label}.example.com`,
     verificationMethod: 'dns_txt',
     verificationTokenHash: hashVerificationToken(generateVerificationToken()),
-  });
+  }, signUp.user.id, null);
 
   return { organizationId: org.id, ownerUserId: signUp.user.id, projectId: project.id, domainId: domain.id };
 }
@@ -76,12 +76,12 @@ describe('tenant repository isolation, per resource type', () => {
       const listA = await tenant.listProjectsForOrganization(a.organizationId, { limit: 50 });
       expect(listA.items.map((p) => p.id)).not.toContain(b.projectId);
 
-      const updateResult = await tenant.updateProjectForOrganization(a.organizationId, b.projectId, { name: 'Hijacked' });
+      const updateResult = await tenant.updateProjectForOrganization(a.organizationId, b.projectId, { name: 'Hijacked' }, a.ownerUserId, null);
       expect(updateResult).toBeNull();
       const bStillIntact = await tenant.getProjectForOrganization(b.organizationId, b.projectId);
       expect(bStillIntact?.name).toBe('Project proj-b');
 
-      const deleteResult = await tenant.softDeleteProjectForOrganization(a.organizationId, b.projectId);
+      const deleteResult = await tenant.softDeleteProjectForOrganization(a.organizationId, b.projectId, a.ownerUserId, null);
       expect(deleteResult).toBeNull();
       const bStillActive = await tenant.getProjectForOrganization(b.organizationId, b.projectId);
       expect(bStillActive?.status).toBe('active');
@@ -101,7 +101,7 @@ describe('tenant repository isolation, per resource type', () => {
       expect(listA.items.map((d) => d.id)).toContain(a.domainId);
 
       const bDomainBefore = await tenant.getDomainForOrganization(b.organizationId, b.domainId);
-      const rotateResult = await tenant.rotateVerificationTokenForOrganization(a.organizationId, b.domainId, 'x'.repeat(64));
+      const rotateResult = await tenant.rotateVerificationTokenForOrganization(a.organizationId, b.domainId, 'x'.repeat(64), a.ownerUserId, null);
       expect(rotateResult).toBeNull();
       const bDomainAfter = await tenant.getDomainForOrganization(b.organizationId, b.domainId);
       expect(bDomainAfter?.verificationTokenHash).toBe(bDomainBefore?.verificationTokenHash);

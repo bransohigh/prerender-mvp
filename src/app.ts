@@ -116,7 +116,7 @@ export async function buildApp(options?: AppOptions) {
   const projectService = createProjectService(projectRepository);
   const domainService = createDomainService(domainRepository);
   const authDb = dbClient?.db ?? null;
-  const invitationService = authDb ? createInvitationService(authDb) : null;
+  const invitationService = authDb ? createInvitationService(authDb, metrics) : null;
 
   const capacity = createCapacityController({
     maxConcurrent: options?.maxConcurrentRenders ?? env.MAX_CONCURRENT_RENDERS,
@@ -206,7 +206,7 @@ export async function buildApp(options?: AppOptions) {
   });
 
   if (auth) {
-    await registerAuthRoutes(app, auth);
+    await registerAuthRoutes(app, auth, metrics);
   }
 
   if (auth && authDb && invitationService) {

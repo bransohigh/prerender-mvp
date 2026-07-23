@@ -371,3 +371,4 @@ Metrics, structured logging, `/livez` ve `/readyz` için bkz. [OBSERVABILITY.md]
 - Roller ve yetki matrisi, cross-tenant 404 davranışı, organizationId backfill prosedürü için bkz. [TENANCY.md](TENANCY.md).
 - Auth/render mimarisi, session cookie detayları, API key modeli için bkz. [AUTHENTICATION.md](AUTHENTICATION.md).
 - Cookie güvenliği, CSRF, rate limiting, session tehdit modeli için bkz. [SECURITY.md](SECURITY.md).
+- Tenant audit history (`GET /v1/organizations/:organizationId/audit-events`, owner/admin only) ve platform-level `auth.login.*` security event ayrımı için bkz. [AUDIT_LOGGING.md](AUDIT_LOGGING.md).

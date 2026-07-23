@@ -13,6 +13,7 @@ import {
 import { AppError } from '../../lib/app-error.js';
 import { insertAuditEventRow } from './audit-repository.js';
 import { buildAuditMetadata } from '../../lib/audit-events.js';
+import { createNoopMetrics, type Metrics } from '../../lib/metrics.js';
 import type {
   Project,
   Domain,
@@ -72,7 +73,7 @@ export interface InvitationSummary {
 // call sites (e.g. domain-verification-service, sitemap-discovery-service)
 // and by the transitional legacy routes/render route — never directly by a
 // route handler that hasn't already established organization scope.
-export function createTenantRepository(db: Database) {
+export function createTenantRepository(db: Database, metrics: Metrics = createNoopMetrics()) {
   async function getDomainForOrganization(organizationId: string, domainId: string): Promise<Domain | null> {
     const rows = await db
       .select({ domain: domains })
@@ -131,13 +132,33 @@ export function createTenantRepository(db: Database) {
     getOrganizationStatus,
     getSitemapSourceForOrganization,
     // ---- projects ----------------------------------------------------
-    async createProjectForOrganization(organizationId: string, input: CreateProjectInput): Promise<Project> {
+    async createProjectForOrganization(
+      organizationId: string,
+      input: CreateProjectInput,
+      actorUserId: string,
+      requestId: string | null,
+    ): Promise<Project> {
       try {
-        const [row] = await db
-          .insert(projects)
-          .values({ ...input, organizationId })
-          .returning();
-        return row as Project;
+        return await db.transaction(async (tx) => {
+          const [row] = await tx
+            .insert(projects)
+            .values({ ...input, organizationId })
+            .returning();
+          const created = row as Project;
+          await insertAuditEventRow(tx, {
+            organizationId,
+            actorUserId,
+            actorApiKeyId: null,
+            action: 'project.created',
+            targetType: 'project',
+            targetId: created.id,
+            result: 'success',
+            errorCode: null,
+            requestId,
+            metadata: null,
+          }, metrics);
+          return created;
+        });
       } catch (err) {
         if (isUniqueViolation(err)) {
           throw new AppError('PROJECT_SLUG_CONFLICT', `Slug already in use: ${input.slug}`);
@@ -176,14 +197,41 @@ export function createTenantRepository(db: Database) {
       organizationId: string,
       projectId: string,
       input: UpdateProjectInput,
+      actorUserId: string,
+      requestId: string | null,
     ): Promise<Project | null> {
       try {
-        const [row] = await db
-          .update(projects)
-          .set({ ...input, updatedAt: new Date() })
-          .where(and(eq(projects.id, projectId), eq(projects.organizationId, organizationId)))
-          .returning();
-        return (row as Project) ?? null;
+        return await db.transaction(async (tx) => {
+          const [before] = await tx
+            .select({ status: projects.status })
+            .from(projects)
+            .where(and(eq(projects.id, projectId), eq(projects.organizationId, organizationId)))
+            .limit(1);
+          const [row] = await tx
+            .update(projects)
+            .set({ ...input, updatedAt: new Date() })
+            .where(and(eq(projects.id, projectId), eq(projects.organizationId, organizationId)))
+            .returning();
+          if (!row) return null;
+          const updated = row as Project;
+          await insertAuditEventRow(tx, {
+            organizationId,
+            actorUserId,
+            actorApiKeyId: null,
+            action: 'project.updated',
+            targetType: 'project',
+            targetId: projectId,
+            result: 'success',
+            errorCode: null,
+            requestId,
+            metadata: buildAuditMetadata(
+              input.status
+                ? { projectStatusBefore: before?.status, projectStatusAfter: updated.status }
+                : {},
+            ),
+          }, metrics);
+          return updated;
+        });
       } catch (err) {
         if (isUniqueViolation(err)) {
           throw new AppError('PROJECT_SLUG_CONFLICT', `Slug already in use: ${input.slug}`);
@@ -192,13 +240,39 @@ export function createTenantRepository(db: Database) {
       }
     },
 
-    async softDeleteProjectForOrganization(organizationId: string, projectId: string): Promise<Project | null> {
-      const [row] = await db
-        .update(projects)
-        .set({ status: 'deleted', updatedAt: new Date() })
-        .where(and(eq(projects.id, projectId), eq(projects.organizationId, organizationId)))
-        .returning();
-      return (row as Project) ?? null;
+    async softDeleteProjectForOrganization(
+      organizationId: string,
+      projectId: string,
+      actorUserId: string,
+      requestId: string | null,
+    ): Promise<Project | null> {
+      return db.transaction(async (tx) => {
+        const [before] = await tx
+          .select({ status: projects.status })
+          .from(projects)
+          .where(and(eq(projects.id, projectId), eq(projects.organizationId, organizationId)))
+          .limit(1);
+        const [row] = await tx
+          .update(projects)
+          .set({ status: 'deleted', updatedAt: new Date() })
+          .where(and(eq(projects.id, projectId), eq(projects.organizationId, organizationId)))
+          .returning();
+        if (!row) return null;
+        const deleted = row as Project;
+        await insertAuditEventRow(tx, {
+          organizationId,
+          actorUserId,
+          actorApiKeyId: null,
+          action: 'project.deleted',
+          targetType: 'project',
+          targetId: projectId,
+          result: 'success',
+          errorCode: null,
+          requestId,
+          metadata: buildAuditMetadata({ projectStatusBefore: before?.status, projectStatusAfter: 'deleted' }),
+        }, metrics);
+        return deleted;
+      });
     },
 
     // ---- domains -------------------------------------------------------
@@ -211,6 +285,8 @@ export function createTenantRepository(db: Database) {
         verificationMethod: VerificationMethod;
         verificationTokenHash: string;
       },
+      actorUserId: string,
+      requestId: string | null,
     ): Promise<Domain> {
       // Verifying the project belongs to this org happens in the same
       // transaction as the insert, so a caller cannot attach a domain to
@@ -229,7 +305,20 @@ export function createTenantRepository(db: Database) {
             .insert(domains)
             .values({ projectId, ...input })
             .returning();
-          return row as Domain;
+          const created = row as Domain;
+          await insertAuditEventRow(tx, {
+            organizationId,
+            actorUserId,
+            actorApiKeyId: null,
+            action: 'domain.created',
+            targetType: 'domain',
+            targetId: created.id,
+            result: 'success',
+            errorCode: null,
+            requestId,
+            metadata: buildAuditMetadata({ verificationMethod: input.verificationMethod }),
+          }, metrics);
+          return created;
         } catch (err) {
           if (isUniqueViolation(err)) {
             throw new AppError('DOMAIN_ALREADY_EXISTS', `Domain already registered: ${input.normalizedHostname}`);
@@ -265,50 +354,97 @@ export function createTenantRepository(db: Database) {
       organizationId: string,
       domainId: string,
       newTokenHash: string,
+      actorUserId: string,
+      requestId: string | null,
     ): Promise<Domain | null> {
       const existing = await getDomainForOrganization(organizationId, domainId);
       if (!existing) return null;
       const wasVerified = existing.status === 'verified';
-      const [row] = await db
-        .update(domains)
-        .set({
-          verificationTokenHash: newTokenHash,
-          status: wasVerified ? 'pending' : existing.status,
-          verifiedAt: wasVerified ? null : existing.verifiedAt,
-          updatedAt: new Date(),
-        })
-        .where(eq(domains.id, domainId))
-        .returning();
-      return (row as Domain) ?? null;
+      return db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(domains)
+          .set({
+            verificationTokenHash: newTokenHash,
+            status: wasVerified ? 'pending' : existing.status,
+            verifiedAt: wasVerified ? null : existing.verifiedAt,
+            updatedAt: new Date(),
+          })
+          .where(eq(domains.id, domainId))
+          .returning();
+        if (!row) return null;
+        await insertAuditEventRow(tx, {
+          organizationId,
+          actorUserId,
+          actorApiKeyId: null,
+          action: 'domain.verification_token.rotated',
+          targetType: 'domain',
+          targetId: domainId,
+          result: 'success',
+          errorCode: null,
+          requestId,
+          metadata: buildAuditMetadata({ verificationMethod: existing.verificationMethod }),
+        }, metrics);
+        return row as Domain;
+      });
     },
 
+    // Two-stage network-operation pattern (Checkpoint 3C-2): the caller
+    // (src/services/domain-verification-service.ts's verifyDomainOrThrow)
+    // records a domain.verification.attempted audit event via AuditService
+    // BEFORE calling this — outside any transaction, since the DNS/HTTP
+    // check itself happens between that write and this one. This method
+    // only ever runs AFTER the network check completes, and persists the
+    // final domain state + the succeeded/failed audit event together in
+    // one transaction — never a transaction held open across the network
+    // call itself.
     async markVerificationAttemptForOrganization(
       organizationId: string,
       domainId: string,
       result: { success: true } | { success: false; failureCode: string },
+      actorUserId: string,
+      requestId: string | null,
     ): Promise<Domain | null> {
       const existing = await getDomainForOrganization(organizationId, domainId);
       if (!existing) return null;
       const now = new Date();
-      if (result.success) {
-        const [row] = await db
-          .update(domains)
-          .set({ status: 'verified', verifiedAt: now, lastVerificationAttemptAt: now, verificationFailureCount: 0, updatedAt: now })
-          .where(eq(domains.id, domainId))
-          .returning();
-        return (row as Domain) ?? null;
-      }
-      const [row] = await db
-        .update(domains)
-        .set({
-          status: existing.status === 'verified' ? 'verified' : 'failed',
-          lastVerificationAttemptAt: now,
-          verificationFailureCount: existing.verificationFailureCount + 1,
-          updatedAt: now,
-        })
-        .where(eq(domains.id, domainId))
-        .returning();
-      return (row as Domain) ?? null;
+      return db.transaction(async (tx) => {
+        let row: typeof domains.$inferSelect | undefined;
+        if (result.success) {
+          [row] = await tx
+            .update(domains)
+            .set({ status: 'verified', verifiedAt: now, lastVerificationAttemptAt: now, verificationFailureCount: 0, updatedAt: now })
+            .where(eq(domains.id, domainId))
+            .returning();
+        } else {
+          [row] = await tx
+            .update(domains)
+            .set({
+              status: existing.status === 'verified' ? 'verified' : 'failed',
+              lastVerificationAttemptAt: now,
+              verificationFailureCount: existing.verificationFailureCount + 1,
+              updatedAt: now,
+            })
+            .where(eq(domains.id, domainId))
+            .returning();
+        }
+        if (!row) return null;
+        await insertAuditEventRow(tx, {
+          organizationId,
+          actorUserId,
+          actorApiKeyId: null,
+          action: result.success ? 'domain.verification.succeeded' : 'domain.verification.failed',
+          targetType: 'domain',
+          targetId: domainId,
+          result: 'success',
+          errorCode: null,
+          requestId,
+          metadata: buildAuditMetadata({
+            verificationMethod: existing.verificationMethod,
+            reasonCode: result.success ? undefined : result.failureCode,
+          }),
+        }, metrics);
+        return row as Domain;
+      });
     },
 
     // ---- sitemap sources -----------------------------------------------
@@ -470,7 +606,7 @@ export function createTenantRepository(db: Database) {
           errorCode: null,
           requestId,
           metadata: buildAuditMetadata({ roleBefore, roleAfter: role }),
-        });
+        }, metrics);
       });
       const rows = await db
         .select({
@@ -511,7 +647,7 @@ export function createTenantRepository(db: Database) {
           errorCode: null,
           requestId,
           metadata: buildAuditMetadata({ roleBefore: existing.role }),
-        });
+        }, metrics);
       });
       return 'removed';
     },
@@ -574,7 +710,7 @@ export function createTenantRepository(db: Database) {
           errorCode: null,
           requestId,
           metadata: null,
-        });
+        }, metrics);
       });
       return 'cancelled';
     },

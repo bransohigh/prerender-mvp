@@ -136,6 +136,17 @@ There is no suspend/unsuspend management endpoint in this checkpoint (out
 of scope per the checkpoint instructions) — only the repository/schema
 support and test fixtures exist so render authorization can enforce it.
 
+## Tenant audit history (Checkpoint 3C)
+
+`GET /v1/organizations/:organizationId/audit-events` (owner/admin only,
+cursor-paginated) exposes the organization's audit history — project,
+domain, sitemap, API key, invitation, and membership mutations. See
+[AUDIT_LOGGING.md](AUDIT_LOGGING.md) for the full action list, the
+metadata allowlist, transactional-vs-two-stage write guarantees, and the
+distinction between this tenant history and platform-level
+`auth.login.*`/`auth.logout` security events (which are never tenant
+audit rows).
+
 ## Not yet implemented (tracked for a later checkpoint)
 
 - Ownership transfer.

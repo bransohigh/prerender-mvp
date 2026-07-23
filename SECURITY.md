@@ -208,10 +208,22 @@ Ayrıntılar için bkz. [DOMAIN_VERIFICATION.md](DOMAIN_VERIFICATION.md) ve
 - `scripts/security-smoke.sh`, `TLS_MODE=true` + `CACERT=...` + `API_URL=https://localhost:3443` ile çalıştırıldığında gerçek bir cookie-jar login/authenticated-request/logout akışını HTTPS üzerinden doğrular, session cookie'nin `Secure`/`HttpOnly`/`SameSite=Lax`/`Path=/`/no-`Domain` bayraklarını gerçek `Set-Cookie` header'ından okur (asla bir Secure cookie'yi elle bir HTTP header'ına kopyalamaz), ve `/metrics`'in gateway üzerinden 404 döndüğünü doğrular.
 - Base (TLS olmayan) `compose.hardened.yml` profili değişmedi — hâlâ yalnızca `127.0.0.1`'e yayınlanır ve gerçek TLS dağıtım katmanı henüz yok; bu gateway yalnızca CI/smoke'un production davranışını (HTTPS trusted origin + Secure cookie) dürüstçe test edebilmesi içindir.
 
+## Tenant Audit History (Checkpoint 3C)
+
+Organizasyon bazlı audit history (`GET /v1/organizations/:organizationId/audit-events`,
+yalnızca owner/admin) ve platform-level `auth.login.*`/`auth.logout`
+security event'lerinin (asla `audit_events` satırı değil, yalnızca
+structured log + metrics) ayrımı için bkz. [AUDIT_LOGGING.md](AUDIT_LOGGING.md).
+Kritik mutasyonlar (proje/domain/API key/invitation/membership) audit
+satırıyla aynı Postgres transaction'ında commit edilir — audit insert
+başarısız olursa mutasyon rollback olur.
+
 ## Sonraki Adımlar
 
-- Audit log
-- Kapsamlı CSRF/CORS adversarial test matrisi
+- Kapsamlı CSRF/CORS adversarial test matrisi (Checkpoint 3C-3)
+- Docker hardened smoke akışına audit event doğrulaması eklenmesi (Checkpoint 3C-3)
+- `render.authorization_rejected` audit event wiring (Checkpoint 3C-3)
+- Audit retention/arşivleme otomasyonu, SIEM export
 - Periyodik domain re-verification
 - Container image vulnerability scanning
 - Kubernetes NetworkPolicy entegrasyonu

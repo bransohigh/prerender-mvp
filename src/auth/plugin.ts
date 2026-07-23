@@ -3,6 +3,8 @@ import type { Auth } from './auth.js';
 import { env } from '../config/env.js';
 import { createRateLimiter, type RateLimiter } from '../lib/rate-limiter.js';
 import { normalizedEmailDigest } from '../lib/rate-limit-keys.js';
+import { recordAuthSecurityEvent } from '../lib/security-events.js';
+import { createNoopMetrics, type Metrics } from '../lib/metrics.js';
 
 // Mounts Better Auth's handler under /api/auth/*, following the officially
 // documented Fastify integration pattern (Better Auth ships Node/Next/Svelte
@@ -11,7 +13,7 @@ import { normalizedEmailDigest } from '../lib/rate-limit-keys.js';
 // bytes Better Auth expects to verify/parse are preserved (Fastify's default
 // JSON parser would otherwise consume and re-serialize the body, which is
 // lossy for signed/encoded payloads).
-export async function registerAuthRoutes(app: FastifyInstance, auth: Auth): Promise<void> {
+export async function registerAuthRoutes(app: FastifyInstance, auth: Auth, metrics?: Metrics): Promise<void> {
   // Registered as a child scope so the raw-buffer content-type parser below
   // is encapsulated to /api/auth/* only and does not affect the JSON body
   // parsing used by the rest of the app's routes.
@@ -20,11 +22,11 @@ export async function registerAuthRoutes(app: FastifyInstance, auth: Auth): Prom
       done(null, body);
     });
 
-    registerAuthHandler(scope, auth);
+    registerAuthHandler(scope, auth, metrics ?? createNoopMetrics());
   });
 }
 
-function registerAuthHandler(app: FastifyInstance, auth: Auth): void {
+function registerAuthHandler(app: FastifyInstance, auth: Auth, metrics: Metrics): void {
   // Process-local, keyed by IP and by an HMAC digest of the normalized
   // email (never the raw email — see src/lib/rate-limit-keys.ts). A
   // failed login only ever consumes the IP bucket if the body can't even
@@ -88,8 +90,23 @@ function registerAuthHandler(app: FastifyInstance, auth: Auth): void {
       // it doesn't inherit a permanent penalty from earlier failures —
       // the IP bucket is left as-is (still a meaningful signal on shared
       // IPs/NATs).
-      if (request.method === 'POST' && path === 'sign-in/email' && response.status === 200 && loginEmailKey) {
-        loginEmailLimiter.reset(loginEmailKey);
+      if (request.method === 'POST' && path === 'sign-in/email') {
+        if (response.status === 200) {
+          if (loginEmailKey) loginEmailLimiter.reset(loginEmailKey);
+          recordAuthSecurityEvent(request.log, metrics, { event: 'auth.login.success', requestId: request.id });
+        } else {
+          // errorCode is a fixed HTTP-status-derived label, never Better
+          // Auth's own free-text error message (which can echo request
+          // input) — see src/lib/security-events.ts's leakage constraints.
+          recordAuthSecurityEvent(request.log, metrics, {
+            event: 'auth.login.failure',
+            requestId: request.id,
+            errorCode: `http_${response.status}`,
+          });
+        }
+      }
+      if (request.method === 'POST' && path === 'sign-out' && response.status === 200) {
+        recordAuthSecurityEvent(request.log, metrics, { event: 'auth.logout', requestId: request.id });
       }
 
       reply.status(response.status);
