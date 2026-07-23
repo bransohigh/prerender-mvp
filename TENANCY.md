@@ -147,6 +147,23 @@ distinction between this tenant history and platform-level
 `auth.login.*`/`auth.logout` security events (which are never tenant
 audit rows).
 
+## Route security-class separation (Checkpoint 3C-3)
+
+Three distinct classes, never conflated:
+
+1. **Better Auth's own mount** (`/api/auth/*`) — Better Auth's own Origin
+   handling is preserved as-is; the Fastify bridge (`src/auth/plugin.ts`)
+   forwards the real client `Origin`/`Host`/all headers through
+   unmodified, and no second, conflicting Origin policy is applied on top
+   of it.
+2. **Cookie-authenticated management** (`/v1/organizations/*`) — the
+   centralized Origin-exact-match CSRF hook (SECURITY.md) applies to
+   every mutating request.
+3. **Project render API** (`POST /v1/render`) — authenticated only by
+   `x-render-api-key`; never subject to the CSRF Origin hook (it isn't
+   cookie-authenticated) and never browser-callable via CORS (see
+   AUTHENTICATION.md).
+
 ## Not yet implemented (tracked for a later checkpoint)
 
 - Ownership transfer.

@@ -45,11 +45,51 @@ security events only.
 
 **API keys**: `api_key.created`, `api_key.rotated`, `api_key.revoked`.
 
-**Render authorization**: `render.authorization_rejected` is declared for
-a future checkpoint (Checkpoint 3C-3) — not yet wired. Successful renders
-are intentionally never audited; metrics and structured logs already
-cover render volume, and a per-render audit row would be excessive
-write volume for no additional security value.
+**Render authorization**: `render.authorization_rejected` is wired
+(Checkpoint 3C-3) — see "Render rejection attribution policy" below.
+Successful renders are intentionally never audited; metrics and
+structured logs already cover render volume, and a per-render audit row
+would be excessive write volume for no additional security value.
+
+## Render rejection attribution policy
+
+`POST /v1/render` rejections are audited **only when they can be safely
+and confidently attributed to a valid project API key's own verified
+scope** — see `src/routes/render.ts`'s `AUDITABLE_REJECTION_CODES`. A key
+only reaches this stage after `verifyRenderApiKey` has already succeeded
+(cryptographically valid, unexpired, unrevoked, metadata well-formed), so
+`organizationId`/`projectId` are trustworthy at that point.
+
+**Audited** (organizationId/actorApiKeyId come from the verified key):
+`ORGANIZATION_NOT_FOUND`, `ORGANIZATION_SUSPENDED`, `PROJECT_NOT_FOUND`,
+`PROJECT_SUSPENDED`, `DOMAIN_NOT_FOUND` (covers both "doesn't exist" and
+"belongs to a different project" — the two are never distinguished in the
+API response, but the audit row's `errorCode` still records which one
+server-side), `DOMAIN_NOT_VERIFIED`, `URL_DOMAIN_MISMATCH`.
+
+**Never audited** (no trustworthy scope exists to attribute to):
+`API_KEY_INVALID`, `API_KEY_EXPIRED`, `API_KEY_REVOKED`,
+`API_KEY_METADATA_INVALID`, missing/duplicate/malformed key header,
+`RATE_LIMITED`. These stay structured-log + metrics only.
+
+**Actor**: always `{ type: 'api_key', apiKeyId: scope.apiKeyId }` —
+`actorUserId` is always null (no browser session is ever involved in
+render authorization). `targetType` is `'domain'`, `targetId` is always
+`null` (the domain lookup itself may be exactly what failed, so no
+domain id is assumed valid), and `metadata` is only `{ reasonCode:
+<the AppErrorCode> }` — never a plaintext key, key hash, raw metadata,
+full URL, URL path/query, hostname, request body, Origin, or IP.
+
+**Write behavior**: best-effort, via `AuditService.record()` (a
+standalone, non-transactional write — there is no mutation to pair it
+with, since a render rejection changes no database state). A failure
+writing this audit row is caught and logged, and never changes the
+rejection decision itself — `renderUrl()` (and therefore Chromium/
+capacity acquisition) is never reached from the rejection path, so an
+audit failure cannot possibly "allow" a render. See
+`test/db/render-authorization.test.ts`'s `render.authorization_rejected
+audit wiring` describe block for the full proof, including that an
+invalid/missing/revoked key creates zero tenant audit rows.
 
 ## Transactional vs. best-effort audit behavior
 
@@ -240,7 +280,7 @@ already-committed mutation.
 - No SIEM/external export.
 - No audit-record deletion endpoint — audit rows are not user-editable or
   deletable through the API by design.
-- `render.authorization_rejected` is declared but not yet wired
-  (Checkpoint 3C-3).
-- The full adversarial CSRF/CORS test matrix and the Docker hardened-smoke
-  extension covering audit flows remain Checkpoint 3C-3.
+- Organization suspend/unsuspend has no management endpoint yet — status
+  can only be set directly in the database (repository/schema support
+  exists so render authorization can already enforce it).
+- Ownership transfer is not implemented.

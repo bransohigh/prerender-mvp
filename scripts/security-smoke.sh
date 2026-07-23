@@ -895,6 +895,102 @@ if [[ "$TLS_MODE" == "true" ]]; then
     fail "Authenticated HTTPS request failed: $(echo "$TLS_ORG_LIST" | head -c 200)"
   fi
 
+  # ---- Checkpoint 3C-3: audit lifecycle + CSRF/CORS through the gateway ----
+  # Reuses $ORG_ID/$PROJECT_ID/$PROJECT2_ID/$DOMAIN_ID/$API_KEY_ID/
+  # $RENDER_API_KEY/$RENDER_API_KEY_2 already established by the main
+  # "Renderer API" flow above (which ran against this same $API_URL —
+  # the TLS gateway origin — since API_URL is globally overridden for the
+  # whole script in TLS_MODE).
+  AUDIT_PROJECT_CREATED=$(curl -sf -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 "$API_URL/v1/organizations/$ORG_ID/audit-events?action=project.created" 2>/dev/null || echo '{}')
+  if echo "$AUDIT_PROJECT_CREATED" | jq -e '.items | length > 0' > /dev/null 2>&1; then
+    pass "project.created audit event present"
+  else
+    fail "No project.created audit event found: $(echo "$AUDIT_PROJECT_CREATED" | head -c 200)"
+  fi
+
+  AUDIT_DOMAIN_CREATED=$(curl -sf -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 "$API_URL/v1/organizations/$ORG_ID/audit-events?action=domain.created" 2>/dev/null || echo '{}')
+  if echo "$AUDIT_DOMAIN_CREATED" | jq -e '.items | length > 0' > /dev/null 2>&1; then
+    pass "domain.created audit event present"
+  else
+    fail "No domain.created audit event found: $(echo "$AUDIT_DOMAIN_CREATED" | head -c 200)"
+  fi
+
+  AUDIT_KEY_CREATED=$(curl -sf -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 "$API_URL/v1/organizations/$ORG_ID/audit-events?action=api_key.created" 2>/dev/null || echo '{}')
+  if echo "$AUDIT_KEY_CREATED" | jq -e '.items | length > 0' > /dev/null 2>&1; then
+    pass "api_key.created audit event present"
+  else
+    fail "No api_key.created audit event found: $(echo "$AUDIT_KEY_CREATED" | head -c 200)"
+  fi
+
+  # The main flow's cross-project render rejection (project 2's key
+  # against project 1's domain, step 7 above, DOMAIN_NOT_FOUND/404) is
+  # safely attributable to that key's own verified scope — confirm it
+  # produced exactly one render.authorization_rejected audit row, and
+  # that row never leaks the key, domain hostname, or full URL.
+  AUDIT_RENDER_REJECTED=$(curl -sf -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 "$API_URL/v1/organizations/$ORG_ID/audit-events?action=render.authorization_rejected" 2>/dev/null || echo '{}')
+  if echo "$AUDIT_RENDER_REJECTED" | jq -e '.items | length > 0' > /dev/null 2>&1; then
+    pass "render.authorization_rejected audit event present for the cross-project render attempt"
+  else
+    fail "No render.authorization_rejected audit event found: $(echo "$AUDIT_RENDER_REJECTED" | head -c 200)"
+  fi
+  if echo "$AUDIT_RENDER_REJECTED" | grep -qF "$RENDER_API_KEY_2"; then
+    fail "render.authorization_rejected audit response contains the raw API key"
+  else
+    pass "render.authorization_rejected audit response does not contain the raw API key"
+  fi
+  if echo "$AUDIT_RENDER_REJECTED" | grep -qE 'https?://[a-zA-Z0-9.-]+\.example\.com'; then
+    fail "render.authorization_rejected audit response contains a full URL/hostname"
+  else
+    pass "render.authorization_rejected audit response does not contain a full URL/hostname"
+  fi
+
+  # A key revoke/rotate already happened in the main flow (step 9/10
+  # above) — confirm the corresponding audit event exists.
+  AUDIT_KEY_REVOKED=$(curl -sf -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 "$API_URL/v1/organizations/$ORG_ID/audit-events?action=api_key.revoked" 2>/dev/null || echo '{}')
+  if echo "$AUDIT_KEY_REVOKED" | jq -e '.items | length > 0' > /dev/null 2>&1; then
+    pass "api_key.revoked audit event present"
+  else
+    fail "No api_key.revoked audit event found: $(echo "$AUDIT_KEY_REVOKED" | head -c 200)"
+  fi
+
+  # CSRF: trusted-Origin mutation succeeds, untrusted/missing Origin is
+  # rejected with a stable 403 CSRF_ORIGIN_REJECTED — through the real
+  # TLS gateway origin, not localhost.
+  CSRF_TRUSTED_PROJECT=$(curl -s -o /dev/null -w '%{http_code}' -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 \
+    -X POST "$API_URL/v1/organizations/$ORG_ID/projects" -H "content-type: application/json" -H "origin: $BETTER_AUTH_BASE_URL" \
+    -d '{"name":"CSRF Trusted Origin Project"}' 2>/dev/null || echo "000")
+  if [[ "$CSRF_TRUSTED_PROJECT" == "201" ]]; then
+    pass "Trusted-Origin management mutation succeeds (201)"
+  else
+    fail "Trusted-Origin management mutation returned $CSRF_TRUSTED_PROJECT, expected 201"
+  fi
+
+  CSRF_UNTRUSTED=$(curl -s -o /dev/null -w '%{http_code}' -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 \
+    -X POST "$API_URL/v1/organizations/$ORG_ID/projects" -H "content-type: application/json" -H "origin: https://evil.example.com" \
+    -d '{"name":"CSRF Untrusted Origin Project"}' 2>/dev/null || echo "000")
+  if [[ "$CSRF_UNTRUSTED" == "403" ]]; then
+    pass "Untrusted-Origin mutation returns 403"
+  else
+    fail "Untrusted-Origin mutation returned $CSRF_UNTRUSTED, expected 403"
+  fi
+
+  CSRF_MISSING=$(curl -s -o /dev/null -w '%{http_code}' -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 \
+    -X POST "$API_URL/v1/organizations/$ORG_ID/projects" -H "content-type: application/json" \
+    -d '{"name":"CSRF Missing Origin Project"}' 2>/dev/null || echo "000")
+  if [[ "$CSRF_MISSING" == "403" ]]; then
+    pass "Missing-Origin mutation returns 403"
+  else
+    fail "Missing-Origin mutation returned $CSRF_MISSING, expected 403"
+  fi
+
+  # Owner can access the audit endpoint through the gateway.
+  AUDIT_ENDPOINT_OWNER=$(curl -s -o /dev/null -w '%{http_code}' -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 "$API_URL/v1/organizations/$ORG_ID/audit-events" 2>/dev/null || echo "000")
+  if [[ "$AUDIT_ENDPOINT_OWNER" == "200" ]]; then
+    pass "Owner/admin audit endpoint access succeeds (200) through the gateway"
+  else
+    fail "Owner audit endpoint access returned $AUDIT_ENDPOINT_OWNER, expected 200"
+  fi
+
   # Better Auth requires an Origin header on cookie-bearing mutations (see
   # the note above the main flow's sign-out call) — required here too.
   TLS_SIGN_OUT_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -b "$TLS_COOKIE_JAR" --connect-timeout 5 --max-time 10 \

@@ -177,7 +177,7 @@ Ayrıntılar için bkz. [DOMAIN_VERIFICATION.md](DOMAIN_VERIFICATION.md) ve
 - Cross-tenant erişim: kaynak başka bir org'a aitse veya kullanıcı üye değilse → **404**, "üye değil" ile "kaynak yok" ayrımı response'ta yapılmaz. Üye ama rolü yetersizse → **403**.
 - Membership/role her request'te DB'den okunur — session cookie'de cache'lenmez; rol değişikliği veya üyelik kaldırma bir sonraki request'te etkili olur.
 - Davet token'ı: 256-bit rastgele, yalnızca oluşturma response'unda bir kez gösterilir, DB'de yalnızca SHA-256 hash saklanır, tek kullanımlık, 24 saat geçerli, iptal edilebilir. Owner rolü davetle asla verilemez.
-- CSRF (minimum, Milestone 2 kapsamı): organization-scoped route'larda her mutasyon (POST/PATCH/PUT/DELETE) `Origin` header'ının `AUTH_TRUSTED_ORIGINS` listesinde olmasını zorunlu kılar; eksik veya güvenilmeyen Origin → 404. CORS tek başına CSRF koruması olarak güvenilmez. `/v1/render` bu kontrole tabi değildir (cookie kullanmaz). Kapsamlı adversarial CSRF/CORS matrisi Milestone 3'e ertelendi.
+- CSRF/CORS (tamamlandı, Checkpoint 3C-3): organization-scoped route'larda her mutasyon (POST/PATCH/PUT/DELETE) `Origin` header'ının `AUTH_TRUSTED_ORIGINS` listesinde olmasını zorunlu kılar; eksik, malformed veya güvenilmeyen Origin → **403 `CSRF_ORIGIN_REJECTED`** (aynı generic gövde, hangi sebep olduğunu asla açıklamaz). Karşılaştırma **hiçbir zaman** prefix/suffix/substring değil — `new URL(origin)` ile parse edilip yalnızca `protocol + host` (WHATWG normalizasyonuyla hostname küçük harfe çevrilir, default port düşürülür) eşitliği kontrol edilir (`src/lib/csrf.ts`'nin `normalizeOriginForComparison()`'ı), böylece `https://example.com.attacker.test`, `https://attacker-example.com`, `https://sub.example.com` gibi confusable hostname'ler asla kabul edilmez, ama `https://EXAMPLE.com` ve `https://example.com:443` güvenli şekilde `https://example.com` ile eşleşir. CORS (`src/app.ts`) ayrı bir katman: credentialed origin'ler için yalnızca tam eşleşen origin echo edilir (`*` asla), `methods`/`allowedHeaders` sabit bir minimum listeye kısıtlanır (arbitrary `Access-Control-Request-Headers` asla yansıtılmaz), `maxAge` sınırlıdır. `x-render-api-key` yönetim CORS allowlist'ine dahil değildir — `/v1/render` cookie kullanmaz, bu kontrole tabi değildir ve Origin header'ının varlığı/yokluğu render yetkilendirmesini değiştirmez. Tam adversarial test matrisi için bkz. `test/csrf.test.ts` ve `test/db/tenancy-isolation.test.ts`'nin "CSRF minimum" bloğu.
 - Metrikler: `prerender_authorization_denials_total{reason}` — sabit değerler (`unauthenticated`/`not_member`/`insufficient_role`), asla user/org/project id içermez.
 
 ## Render Authorization ve Rate Limiting (Checkpoint 3B)
@@ -220,10 +220,9 @@ başarısız olursa mutasyon rollback olur.
 
 ## Sonraki Adımlar
 
-- Kapsamlı CSRF/CORS adversarial test matrisi (Checkpoint 3C-3)
-- Docker hardened smoke akışına audit event doğrulaması eklenmesi (Checkpoint 3C-3)
-- `render.authorization_rejected` audit event wiring (Checkpoint 3C-3)
 - Audit retention/arşivleme otomasyonu, SIEM export
+- Organization suspend/unsuspend management endpoint
+- Ownership transfer
 - Periyodik domain re-verification
 - Container image vulnerability scanning
 - Kubernetes NetworkPolicy entegrasyonu

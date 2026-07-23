@@ -71,6 +71,18 @@ presented. Deployments must set `BETTER_AUTH_SECRET`, `BETTER_AUTH_BASE_URL`,
 and `AUTH_TRUSTED_ORIGINS` instead, run `npm run auth:bootstrap-owner` once,
 and create project-scoped keys through the API for rendering.
 
+## Render API is never browser-callable via CORS (Checkpoint 3C-3)
+
+`/v1/render` is never registered with the cookie-session CSRF Origin hook
+(it isn't cookie-authenticated), and management CORS's `allowedHeaders`
+allowlist deliberately excludes `x-render-api-key` — so even if a browser
+attempted a cross-origin credentialed request to it, the preflight would
+fail before the actual request is sent. A browser session (even a valid
+owner session) never authenticates a render request, and the presence or
+absence of an `Origin` header never changes render-key authorization
+either way. See SECURITY.md's CSRF/CORS section and TENANCY.md's route
+security-class separation.
+
 ## Not implemented in this phase
 
 2FA, social login, password-reset email, ownership transfer.

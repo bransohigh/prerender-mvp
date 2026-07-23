@@ -120,7 +120,7 @@ export async function organizationRoutes(app: FastifyInstance, options: Organiza
   // Origin. This hook is registered only within this plugin's
   // encapsulation, so /v1/render (registered separately, API-key
   // authenticated) is never subject to it.
-  app.addHook('preHandler', createOriginCheckHook(options.trustedOrigins));
+  app.addHook('preHandler', createOriginCheckHook(options.trustedOrigins, metrics));
 
   // ---- organizations --------------------------------------------------
   app.get('/organizations', async (request, reply) => {

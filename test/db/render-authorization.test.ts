@@ -309,3 +309,164 @@ describe('render authorization (real Postgres)', () => {
     expect(after).toBe(before);
   });
 });
+
+describe('render.authorization_rejected audit wiring', () => {
+  async function auditRowsFor(organizationId: string, action: string) {
+    const { auditEvents } = await import('../../src/db/schema.js');
+    return dbClient.db
+      .select()
+      .from(auditEvents)
+      .where(and(eq(auditEvents.organizationId, organizationId), eq(auditEvents.action, action as never)));
+  }
+
+  it('valid key + pending (unverified) domain creates a safe rejection audit', async () => {
+    const a = await createOrgFixture('audit-pending-domain');
+    const project = await createProject(a.organizationId, a.ownerCookie, 'P');
+    const domainRes = await app.inject({
+      method: 'POST',
+      url: `/v1/organizations/${a.organizationId}/projects/${project.id}/domains`,
+      headers: { cookie: a.ownerCookie, origin: TRUSTED_ORIGIN },
+      payload: { hostname: 'audit-pending.example.com', verificationMethod: 'dns_txt' },
+    });
+    const domain = (domainRes.json() as { domain: { id: string } }).domain;
+    const key = await createApiKey(a.organizationId, project.id, a.ownerCookie);
+
+    const res = await renderRequest(key.key, domain.id, 'https://audit-pending.example.com/');
+    expect(res.statusCode).toBe(409);
+
+    const rows = await auditRowsFor(a.organizationId, 'render.authorization_rejected');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.actorApiKeyId).toBe(key.id);
+    expect(rows[0]!.actorUserId).toBeNull();
+    expect(rows[0]!.result).toBe('failure');
+    expect(rows[0]!.errorCode).toBe('DOMAIN_NOT_VERIFIED');
+    expect(rows[0]!.metadata).toEqual({ reasonCode: 'DOMAIN_NOT_VERIFIED' });
+  });
+
+  it('valid key + suspended project creates a safe rejection audit', async () => {
+    const a = await createOrgFixture('audit-suspended-project');
+    const project = await createProject(a.organizationId, a.ownerCookie, 'P');
+    const domainId = await createVerifiedDomain(a.organizationId, project.id, a.ownerCookie, 'audit-suspended-project.example.com');
+    const key = await createApiKey(a.organizationId, project.id, a.ownerCookie);
+    await dbClient.db.update(projects).set({ status: 'suspended' }).where(eq(projects.id, project.id));
+
+    const res = await renderRequest(key.key, domainId, 'https://audit-suspended-project.example.com/');
+    expect(res.statusCode).toBe(403);
+
+    const rows = await auditRowsFor(a.organizationId, 'render.authorization_rejected');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.errorCode).toBe('PROJECT_SUSPENDED');
+    expect(rows[0]!.actorApiKeyId).toBe(key.id);
+  });
+
+  it('valid key + suspended organization creates a safe rejection audit', async () => {
+    const a = await createOrgFixture('audit-suspended-org');
+    const project = await createProject(a.organizationId, a.ownerCookie, 'P');
+    const domainId = await createVerifiedDomain(a.organizationId, project.id, a.ownerCookie, 'audit-suspended-org.example.com');
+    const key = await createApiKey(a.organizationId, project.id, a.ownerCookie);
+    await dbClient.db.update(organizationTable).set({ status: 'suspended' }).where(eq(organizationTable.id, a.organizationId));
+
+    const res = await renderRequest(key.key, domainId, 'https://audit-suspended-org.example.com/');
+    expect(res.statusCode).toBe(403);
+
+    const rows = await auditRowsFor(a.organizationId, 'render.authorization_rejected');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.errorCode).toBe('ORGANIZATION_SUSPENDED');
+  });
+
+  it('valid key + cross-project domain creates a safe rejection audit (never reveals which layer failed to the caller)', async () => {
+    const a = await createOrgFixture('audit-cross-project');
+    const projectA = await createProject(a.organizationId, a.ownerCookie, 'PA');
+    const projectB = await createProject(a.organizationId, a.ownerCookie, 'PB');
+    const domainBId = await createVerifiedDomain(a.organizationId, projectB.id, a.ownerCookie, 'audit-cross-project.example.com');
+    const keyA = await createApiKey(a.organizationId, projectA.id, a.ownerCookie);
+
+    const res = await renderRequest(keyA.key, domainBId, 'https://audit-cross-project.example.com/');
+    expect(res.statusCode).toBe(404);
+    // The HTTP response never says which layer failed...
+    expect(res.json().error).toBe('DOMAIN_NOT_FOUND');
+
+    // ...but the server-side audit row is precise, for the org's own
+    // owner/admin to review.
+    const rows = await auditRowsFor(a.organizationId, 'render.authorization_rejected');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.errorCode).toBe('DOMAIN_NOT_FOUND');
+    expect(rows[0]!.actorApiKeyId).toBe(keyA.id);
+  });
+
+  it('an invalid random key creates no tenant audit row', async () => {
+    const a = await createOrgFixture('audit-invalid-key');
+    const project = await createProject(a.organizationId, a.ownerCookie, 'P');
+    const domainId = await createVerifiedDomain(a.organizationId, project.id, a.ownerCookie, 'audit-invalid-key.example.com');
+
+    const res = await renderRequest(`pr_live_${'z'.repeat(56)}`, domainId, 'https://audit-invalid-key.example.com/');
+    expect(res.statusCode).toBe(401);
+
+    const rows = await auditRowsFor(a.organizationId, 'render.authorization_rejected');
+    expect(rows).toHaveLength(0);
+  });
+
+  it('a missing key creates no tenant audit row (nothing to attribute it to)', async () => {
+    const a = await createOrgFixture('audit-missing-key');
+    const project = await createProject(a.organizationId, a.ownerCookie, 'P');
+    const domainId = await createVerifiedDomain(a.organizationId, project.id, a.ownerCookie, 'audit-missing-key.example.com');
+
+    const res = await app.inject({ method: 'POST', url: '/v1/render', payload: { domainId, url: 'https://audit-missing-key.example.com/' } });
+    expect(res.statusCode).toBe(401);
+
+    const rows = await auditRowsFor(a.organizationId, 'render.authorization_rejected');
+    expect(rows).toHaveLength(0);
+  });
+
+  it('a revoked key creates no tenant audit row (key is no longer trusted at verification time)', async () => {
+    const a = await createOrgFixture('audit-revoked-key');
+    const project = await createProject(a.organizationId, a.ownerCookie, 'P');
+    const domainId = await createVerifiedDomain(a.organizationId, project.id, a.ownerCookie, 'audit-revoked-key.example.com');
+    const key = await createApiKey(a.organizationId, project.id, a.ownerCookie);
+    await app.inject({ method: 'DELETE', url: `/v1/organizations/${a.organizationId}/projects/${project.id}/api-keys/${key.id}`, headers: { cookie: a.ownerCookie, origin: TRUSTED_ORIGIN } });
+
+    const res = await renderRequest(key.key, domainId, 'https://audit-revoked-key.example.com/');
+    expect(res.statusCode).toBe(401);
+
+    const rows = await auditRowsFor(a.organizationId, 'render.authorization_rejected');
+    expect(rows).toHaveLength(0);
+  });
+
+  it('the rejection audit row contains no plaintext key, full URL, hostname, query string, or Origin', async () => {
+    const a = await createOrgFixture('audit-leakage');
+    const project = await createProject(a.organizationId, a.ownerCookie, 'P');
+    const domainId = await createVerifiedDomain(a.organizationId, project.id, a.ownerCookie, 'audit-leakage.example.com');
+    const key = await createApiKey(a.organizationId, project.id, a.ownerCookie);
+    await dbClient.db.update(projects).set({ status: 'suspended' }).where(eq(projects.id, project.id));
+
+    await renderRequest(key.key, domainId, 'https://audit-leakage.example.com/secret-path?token=abc123');
+
+    const rows = await auditRowsFor(a.organizationId, 'render.authorization_rejected');
+    const rowText = JSON.stringify(rows);
+    expect(rowText).not.toContain(key.key);
+    expect(rowText).not.toContain('secret-path');
+    expect(rowText).not.toContain('token=abc123');
+    expect(rowText).not.toContain('audit-leakage.example.com');
+    expect(rowText).not.toContain(TRUSTED_ORIGIN);
+  });
+
+  it('rejection happens before capacity acquisition even when audited', async () => {
+    const a = await createOrgFixture('audit-capacity');
+    const project = await createProject(a.organizationId, a.ownerCookie, 'P');
+    const domainId = await createVerifiedDomain(a.organizationId, project.id, a.ownerCookie, 'audit-capacity.example.com');
+    const key = await createApiKey(a.organizationId, project.id, a.ownerCookie);
+    await dbClient.db.update(projects).set({ status: 'suspended' }).where(eq(projects.id, project.id));
+
+    async function activeAndQueued(): Promise<string> {
+      const res = await app.inject({ method: 'GET', url: '/metrics' });
+      const active = /prerender_render_active (\d+)/.exec(res.body)?.[1];
+      const queued = /prerender_render_queued (\d+)/.exec(res.body)?.[1];
+      return `${active}/${queued}`;
+    }
+
+    const before = await activeAndQueued();
+    await renderRequest(key.key, domainId, 'https://audit-capacity.example.com/');
+    const after = await activeAndQueued();
+    expect(after).toBe(before);
+  });
+});

@@ -16,6 +16,7 @@ import { createRenderService } from './services/render-service.js';
 import { createProjectService } from './services/project-service.js';
 import { createDomainService } from './services/domain-service.js';
 import { metrics as defaultMetrics, type Metrics } from './lib/metrics.js';
+import { normalizeOriginForComparison } from './lib/csrf.js';
 import { createDbClient, type DbClient } from './db/client.js';
 import { createDbReadinessCheck } from './db/readiness.js';
 import { createAuth, type Auth } from './auth/auth.js';
@@ -27,6 +28,8 @@ import { createPostgresProjectRepository } from './repositories/postgres/postgre
 import { createPostgresDomainRepository } from './repositories/postgres/postgres-domain-repository.js';
 import { createPostgresSitemapRepository } from './repositories/postgres/postgres-sitemap-repository.js';
 import { createPostgresDiscoveredUrlRepository } from './repositories/postgres/postgres-discovered-url-repository.js';
+import { createPostgresAuditRepository } from './repositories/postgres/audit-repository.js';
+import { createAuditService } from './services/audit-service.js';
 import type {
   ProjectRepository,
   DomainRepository,
@@ -184,7 +187,12 @@ export async function buildApp(options?: AppOptions) {
   });
   // Render API key requests (server-to-server, no cookies) don't need CORS
   // at all; browser management requests need exact-origin, credentialed
-  // CORS restricted to the configured trusted origins allowlist.
+  // CORS restricted to the configured trusted origins allowlist. Origin
+  // comparison uses the same parsed-protocol+host normalization as
+  // src/lib/csrf.ts (never a raw string / prefix / substring check), so
+  // https://EXAMPLE.com and https://example.com:443 are recognized as the
+  // same trusted https://example.com entry, while sibling subdomains and
+  // prefix/suffix-confusable hostnames are not.
   const trustedOrigins = new Set(env.AUTH_TRUSTED_ORIGINS);
   await app.register(cors, {
     origin: (origin, cb) => {
@@ -196,9 +204,20 @@ export async function buildApp(options?: AppOptions) {
         cb(null, true);
         return;
       }
-      cb(null, trustedOrigins.has(origin));
+      const normalized = normalizeOriginForComparison(origin);
+      cb(null, !!normalized && trustedOrigins.has(normalized));
     },
     credentials: true,
+    // Minimum method/header allowlist actually used by the cookie-authenticated
+    // management API — an arbitrary Access-Control-Request-Headers value
+    // is never reflected back (the plugin's default behavior without an
+    // explicit allowedHeaders list), and x-render-api-key is deliberately
+    // excluded so the render endpoint does not become browser-callable
+    // cross-origin through permissive CORS (it is never cookie-authenticated
+    // and has no browser use case).
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['content-type'],
+    maxAge: 600,
   });
   await app.register(rateLimit, {
     max: 30,
@@ -246,6 +265,9 @@ export async function buildApp(options?: AppOptions) {
 
   const renderApiKeyVerifier: ApiKeyVerifier = authDb ? auth! : (options?.renderApiKeyVerifier ?? denyAllVerifier);
   const renderTenant = authDb ? createTenantRepository(authDb) : (options?.renderTenant ?? denyAllTenant);
+  // Only constructed on the real-Postgres path — render.ts treats this as
+  // optional and skips audit entirely when absent (fake-repo unit tests).
+  const renderAuditService = authDb ? createAuditService(createPostgresAuditRepository(authDb, metrics)) : undefined;
 
   await app.register(renderRoutes, {
     prefix: '/v1',
@@ -253,6 +275,7 @@ export async function buildApp(options?: AppOptions) {
     auth: renderApiKeyVerifier,
     tenant: renderTenant,
     metrics,
+    auditService: renderAuditService,
     getCapacitySnapshot: () => {
       const snapshot = service.getSnapshot();
       return { activeRenders: snapshot.active, queuedRenders: snapshot.queued };

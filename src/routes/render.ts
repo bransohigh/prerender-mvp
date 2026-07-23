@@ -7,9 +7,30 @@ import { normalizeTargetUrl, InvalidTargetUrlError } from '../lib/url-normalize.
 import { createNoopMetrics, safeMetricsCall, type Metrics, type RenderResultLabel } from '../lib/metrics.js';
 import { createRateLimiter, type RateLimiter } from '../lib/rate-limiter.js';
 import { AppError, isAppError, type AppErrorCode } from '../lib/app-error.js';
-import { verifyRenderApiKey, type ApiKeyVerifier } from '../services/render-api-key-auth-service.js';
+import { verifyRenderApiKey, type ApiKeyVerifier, type TrustedRenderKeyScope } from '../services/render-api-key-auth-service.js';
 import type { TenantRepository } from '../repositories/postgres/tenant-repository.js';
 import type { RenderFn } from '../types/render.js';
+import type { AuditService } from '../services/audit-service.js';
+
+// Only these AppErrorCodes are ever audited as render.authorization_rejected
+// — every one of them is thrown AFTER verifyRenderApiKey has already
+// succeeded (see the `scope` variable below), meaning the key was
+// cryptographically valid, unexpired, and unrevoked at verification time,
+// and organizationId/projectId came from that verified key's own
+// metadata — so attributing the rejection to that key's scope reveals
+// nothing an attacker didn't already control (their own key). A garbage,
+// unknown, expired, revoked, or malformed-metadata key never reaches this
+// set — those stay platform security logs/metrics only (no trusted scope
+// exists to attribute them to).
+const AUDITABLE_REJECTION_CODES = new Set<AppErrorCode>([
+  'ORGANIZATION_NOT_FOUND',
+  'ORGANIZATION_SUSPENDED',
+  'PROJECT_NOT_FOUND',
+  'PROJECT_SUSPENDED',
+  'DOMAIN_NOT_FOUND',
+  'DOMAIN_NOT_VERIFIED',
+  'URL_DOMAIN_MISMATCH',
+]);
 
 const renderBodySchema = z.object({
   domainId: z.string().uuid(),
@@ -25,6 +46,13 @@ export interface RenderRouteOptions {
   auth: ApiKeyVerifier;
   tenant: Pick<TenantRepository, 'getOrganizationStatus' | 'getProjectForOrganization' | 'getDomainForOrganizationProject'>;
   metrics?: Metrics;
+  // Optional: absent in fake-repo unit tests. When present, a safely
+  // attributable rejection (see AUDITABLE_REJECTION_CODES) writes a
+  // best-effort render.authorization_rejected row — a failure here is
+  // swallowed and never changes the render decision itself (a render is
+  // never allowed, and a rejection is never turned into a 500, because
+  // the audit write failed).
+  auditService?: AuditService;
   getCapacitySnapshot?: () => { activeRenders: number; queuedRenders: number };
   invalidKeyRateLimiter?: RateLimiter;
   validKeyRateLimiter?: RateLimiter;
@@ -107,12 +135,41 @@ export const renderRoutes: FastifyPluginAsync<RenderRouteOptions> = async (app, 
 
   app.post('/render', async (request, reply) => {
     const startedAt = Date.now();
+    // Set only after verifyRenderApiKey succeeds (see below) — reject()
+    // uses its presence to decide whether a rejection is safely
+    // attributable to a real, verified key scope.
+    let scope: TrustedRenderKeyScope | undefined;
 
-    function reject(code: AppErrorCode) {
+    async function reject(code: AppErrorCode) {
       const { status, body } = renderErrorResponse(code);
       const label = metricsLabelForCode(code);
       safeMetricsCall(() => metrics.incrementRenderResult(label));
       request.log.info({ event: 'render_rejected', result: label }, 'Render reddedildi');
+
+      if (scope && AUDITABLE_REJECTION_CODES.has(code) && opts.auditService) {
+        // Best-effort: never throws past this point, never delays the
+        // rejection response beyond a normal DB round trip, and never
+        // turns a rejection into anything other than the rejection
+        // already decided above — an audit failure cannot "allow" a
+        // render, since renderUrl() is never reached from this function.
+        try {
+          await opts.auditService.record({
+            organizationId: scope.organizationId,
+            actor: { type: 'api_key', apiKeyId: scope.apiKeyId },
+            action: 'render.authorization_rejected',
+            targetType: 'domain',
+            targetId: null,
+            result: 'failure',
+            errorCode: code,
+            requestId: request.id,
+            metadata: { reasonCode: code },
+          });
+        } catch (auditErr) {
+          request.log.error({ event: 'audit.write.failure', action: 'render.authorization_rejected' }, 'audit write failed');
+          void auditErr;
+        }
+      }
+
       if (status === 429) {
         // Retry-After set by the caller before invoking reject() for the
         // rate-limit path specifically (needs the computed seconds value).
@@ -161,7 +218,6 @@ export const renderRoutes: FastifyPluginAsync<RenderRouteOptions> = async (app, 
 
     // 3-4-5. Better Auth key verification + fail-closed metadata + current
     // API-key state (all inside verifyRenderApiKey).
-    let scope;
     try {
       scope = await verifyRenderApiKey(auth, headerValue);
     } catch (err) {
