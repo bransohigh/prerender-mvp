@@ -122,6 +122,14 @@ services:
       - RENDER_QUEUE_TIMEOUT_MS=10000
       - OUTBOUND_PROXY_URL=http://egress-proxy:3128
       - REQUIRE_OUTBOUND_PROXY=true
+      # Phase 8A-2: cache HTML object storage. NODE_ENV=production (set in
+      # the Dockerfile) forbids the `memory` provider default at startup
+      # (src/config/env.ts) — filesystem, rooted in the /tmp tmpfs mount
+      # below, is required here. Not yet written to by any code path
+      # (nothing in /v1/render is cache-aware yet); this only satisfies
+      # startup config validation ahead of that wiring.
+      - CACHE_OBJECT_STORE_PROVIDER=filesystem
+      - CACHE_OBJECT_STORE_ROOT=/tmp/cache-objects
     networks:
       - internal
       - database

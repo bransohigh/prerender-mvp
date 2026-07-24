@@ -23,6 +23,11 @@ services:
         required: false
     environment:
       - DATABASE_URL=postgres://prerender:prerender-dev-only@postgres:5432/prerender_dev
+      # Phase 8A-2: the built image's NODE_ENV=production (set in the
+      # Dockerfile) forbids the CACHE_OBJECT_STORE_PROVIDER=memory default
+      # at startup unless overridden here or in a local .env.
+      - CACHE_OBJECT_STORE_PROVIDER=filesystem
+      - CACHE_OBJECT_STORE_ROOT=/tmp/cache-objects
     ports:
       - "3000:3000"
     restart: unless-stopped

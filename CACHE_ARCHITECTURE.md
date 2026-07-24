@@ -331,6 +331,18 @@ Nothing defaults the filesystem root to the application's own repository
 directory. No S3/R2 (or any other cloud-provider) adapter exists yet;
 adding one is out of scope for this checkpoint.
 
+The Dockerfile sets `NODE_ENV=production` unconditionally, so every
+compose profile that builds that image (`compose.yml`,
+`compose.hardened.yml`, `compose.hardened-ci.yml`) now sets
+`CACHE_OBJECT_STORE_PROVIDER=filesystem` and
+`CACHE_OBJECT_STORE_ROOT=/tmp/cache-objects` explicitly — `/tmp` is
+already a writable `tmpfs` mount in the hardened profiles' read-only-root
+containers (`noexec`, but that only blocks executing files there, not
+reading/writing them), so no new volume or capability was needed. This
+was caught by the `docker-security` CI job failing at "Wait for
+healthy" the first time this checkpoint's config validation shipped
+without the corresponding compose changes.
+
 ## Cache storage service
 
 [`src/services/cache-storage-service.ts`](src/services/cache-storage-service.ts)
