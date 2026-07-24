@@ -225,8 +225,23 @@ Normalized URL yalnızca `cache_entries.normalized_url` kolonunda saklanır;
 hiçbir log satırında, metric label'ında, audit metadata'sında veya hata
 mesajında görünmez (sentinel testle doğrulanmıştır). Storage key'ler
 yalnızca server-generated ID'lerden ve doğrulanmış hex hash'lerden
-üretilir — path traversal yapısal olarak imkansızdır. Henüz `/v1/render`
-ile entegre değildir; hiçbir HTML/obje storage okuma-yazma işlemi yoktur.
+üretilir — path traversal yapısal olarak imkansızdır.
+
+## Render cache HTML object storage (Phase 8A-2)
+
+Immutable, content-addressed HTML object storage eklendi — bkz.
+[CACHE_ARCHITECTURE.md](CACHE_ARCHITECTURE.md). Storage key artık
+`generation` ve `contentHash`'i de içerir, böylece stale bir writer asla
+aktif generation'ın obje byte'larını ezemez (optimistic concurrency ile
+birlikte). Local filesystem adapter: atomic temp-file-then-rename yazma,
+restrictive permission (`0600`/`0700`), symlink traversal koruması,
+storage root dışına çıkan hiçbir path kabul edilmez. `CACHE_OBJECT_STORE_PROVIDER=memory`
+production'da başlangıçta reddedilir (fail closed). Her okuma, stored
+byte'ları decompress edip SHA-256 hash'i metadata ile constant-time
+karşılaştırarak doğrular — bozuk/tahrif edilmiş HTML asla sessizce
+servis edilmez. Storage credential'ları ve tam filesystem path'ler asla
+loglanmaz. Henüz `/v1/render` ile entegre değildir; hiçbir HTML client'a
+dönmez.
 
 ## Sonraki Adımlar
 

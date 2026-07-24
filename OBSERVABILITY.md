@@ -63,6 +63,10 @@ tarafından sık sık pollanır ve `/v1/render` çağıranlarla aynı bütçeyi 
 | `prerender_database_operations_total` | Counter | `operation`, `result` | Sabit, önceden tanımlı operation isimleri (`project_create`, `domain_create`, `sitemap_source_upsert`, `ping` vb.), `result`=`success`\|`failure` |
 | `prerender_cache_operations_total` | Counter | `operation`, `result` | Cache metadata repository işlemi (Phase 8A-1): `operation`=`create_pending`\|`update_ready`\|`update_failed`\|`invalidate`\|`find_by_identity`, `result`=`success`\|`failure`\|`conflict`. Henüz hiçbir route bu metriği artırmıyor — bkz. [CACHE_ARCHITECTURE.md](CACHE_ARCHITECTURE.md) |
 | `prerender_cache_repository_duration_seconds` | Histogram | `operation` | Cache metadata repository işlem süresi, aynı `operation` label seti |
+| `prerender_cache_object_operations_total` | Counter | `operation`, `result` | HTML object-store işlemi (Phase 8A-2): `operation`=`write`\|`read`\|`delete`\|`cleanup`, `result`=`success`\|`failure` |
+| `prerender_cache_object_bytes` | Histogram | `direction`, `encoding` | Yazılan/okunan HTML obje byte boyutu: `direction`=`write`\|`read`, `encoding`=`br`\|`gzip`\|`identity` |
+| `prerender_cache_integrity_failures_total` | Counter | `reason` | Okuma sırasında integrity doğrulama hatası: `reason`=`missing_object`\|`corrupt_data`\|`hash_mismatch`\|`size_limit_exceeded`\|`encoding_mismatch`\|`malformed_metadata` |
+| `prerender_cache_object_operation_duration_seconds` | Histogram | `operation` | HTML object-store işlem süresi, aynı `operation` label seti |
 
 Domain, hostname, project ID, domain ID, sitemap URL veya verification
 token **hiçbir metric label'ında kullanılmaz** — `method`, `result`,
@@ -163,6 +167,21 @@ tam değeri, HTML verification body'si, sitemap XML gövdesi, database
 connection string (`DATABASE_URL`).
 
 `event` değerleri: `render_completed`, `render_rejected`, `render_failed`.
+
+### Cache object storage log alanları (Phase 8A-2)
+
+`src/lib/cache-object-events.ts` şu event'leri üretir:
+`cache.object.write.success`/`.failure`, `cache.object.read.success`/`.failure`,
+`cache.object.integrity_failure`, `cache.object.cleanup.failure`,
+`cache.metadata.ready`, `cache.metadata.failed`. Başarı event'leri
+`debug` seviyesinde (production'da varsayılan olarak görünmez), hata/
+integrity/cleanup event'leri `warn` seviyesindedir — noisy success log
+politikasına uyar. İzin verilen alanlar: `event`, `operation`, `result`,
+`errorCode`, `contentEncoding`, `contentBytes`, `cacheKeyHashPrefix` (ilk
+8 hex karakter), `generation`, `organizationId`/`projectId`/`domainId`.
+**Asla loglanmaz:** HTML gövdesi, normalized/raw URL, query string, tam
+storage key, filesystem path, provider credential, API key, cookie,
+request header/body.
 
 ### URL loglama politikası
 

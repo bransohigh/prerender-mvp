@@ -81,6 +81,22 @@ export type DatabaseOperationResultLabel = 'success' | 'failure';
 export type CacheOperationLabel = 'create_pending' | 'update_ready' | 'update_failed' | 'invalidate' | 'find_by_identity';
 export type CacheOperationResultLabel = 'success' | 'failure' | 'conflict';
 
+// Phase 8A-2. Object-storage-layer metrics — distinct from the
+// metadata-repository metrics above. Never labeled with a URL, hostname,
+// org/project/domain id, cache key, storage key, filesystem path, or
+// request id.
+export type CacheObjectOperationLabel = 'write' | 'read' | 'delete' | 'cleanup';
+export type CacheObjectOperationResultLabel = 'success' | 'failure';
+export type CacheObjectByteDirectionLabel = 'write' | 'read';
+export type CacheObjectEncodingLabel = 'br' | 'gzip' | 'identity';
+export type CacheIntegrityFailureReasonLabel =
+  | 'missing_object'
+  | 'corrupt_data'
+  | 'hash_mismatch'
+  | 'size_limit_exceeded'
+  | 'encoding_mismatch'
+  | 'malformed_metadata';
+
 export interface Metrics {
   observeRenderDuration: (seconds: number) => void;
   observeQueueWait: (seconds: number) => void;
@@ -108,6 +124,10 @@ export interface Metrics {
   incrementAuthSecurityEvent: (event: AuthSecurityEventLabel) => void;
   incrementCacheOperation: (operation: CacheOperationLabel, result: CacheOperationResultLabel) => void;
   observeCacheRepositoryDuration: (operation: CacheOperationLabel, seconds: number) => void;
+  incrementCacheObjectOperation: (operation: CacheObjectOperationLabel, result: CacheObjectOperationResultLabel) => void;
+  observeCacheObjectBytes: (direction: CacheObjectByteDirectionLabel, encoding: CacheObjectEncodingLabel, bytes: number) => void;
+  incrementCacheIntegrityFailure: (reason: CacheIntegrityFailureReasonLabel) => void;
+  observeCacheObjectOperationDuration: (operation: CacheObjectOperationLabel, seconds: number) => void;
   getMetrics: () => Promise<string>;
   getContentType: () => string;
   reset: () => void;
@@ -310,6 +330,35 @@ export function createMetrics(options?: CreateMetricsOptions): Metrics {
     registers: [register],
   });
 
+  const cacheObjectOperationsTotal = new Counter({
+    name: `${prefix}cache_object_operations_total`,
+    help: 'Total HTML object-store operations, by fixed operation and result',
+    labelNames: ['operation', 'result'] as const,
+    registers: [register],
+  });
+
+  const cacheObjectBytes = new Histogram({
+    name: `${prefix}cache_object_bytes`,
+    help: 'HTML object byte size observed on write/read, by fixed direction and encoding',
+    labelNames: ['direction', 'encoding'] as const,
+    buckets: [1_000, 5_000, 25_000, 100_000, 500_000, 1_000_000, 5_000_000, 10_000_000],
+    registers: [register],
+  });
+
+  const cacheIntegrityFailuresTotal = new Counter({
+    name: `${prefix}cache_integrity_failures_total`,
+    help: 'Total cache object read-integrity failures, by fixed reason',
+    labelNames: ['reason'] as const,
+    registers: [register],
+  });
+
+  const cacheObjectOperationDurationSeconds = new Histogram({
+    name: `${prefix}cache_object_operation_duration_seconds`,
+    help: 'HTML object-store operation duration in seconds, by fixed operation',
+    labelNames: ['operation'] as const,
+    registers: [register],
+  });
+
   return {
     observeRenderDuration(seconds) {
       safe(() => renderDurationSeconds.observe(seconds));
@@ -376,6 +425,18 @@ export function createMetrics(options?: CreateMetricsOptions): Metrics {
     observeCacheRepositoryDuration(operation, seconds) {
       safe(() => cacheRepositoryDurationSeconds.labels(operation).observe(seconds));
     },
+    incrementCacheObjectOperation(operation, result) {
+      safe(() => cacheObjectOperationsTotal.labels(operation, result).inc());
+    },
+    observeCacheObjectBytes(direction, encoding, bytes) {
+      safe(() => cacheObjectBytes.labels(direction, encoding).observe(bytes));
+    },
+    incrementCacheIntegrityFailure(reason) {
+      safe(() => cacheIntegrityFailuresTotal.labels(reason).inc());
+    },
+    observeCacheObjectOperationDuration(operation, seconds) {
+      safe(() => cacheObjectOperationDurationSeconds.labels(operation).observe(seconds));
+    },
     async getMetrics() {
       try {
         return await register.metrics();
@@ -415,6 +476,10 @@ export function createNoopMetrics(): Metrics {
     incrementAuthSecurityEvent() {},
     incrementCacheOperation() {},
     observeCacheRepositoryDuration() {},
+    incrementCacheObjectOperation() {},
+    observeCacheObjectBytes() {},
+    incrementCacheIntegrityFailure() {},
+    observeCacheObjectOperationDuration() {},
     async getMetrics() {
       return '';
     },

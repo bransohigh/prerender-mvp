@@ -74,10 +74,46 @@ const envSchema = z
           .map((entry) => entry.trim())
           .filter((entry) => entry.length > 0),
       ),
+
+    // Phase 8A-2 cache object storage. `memory` is a real, distinct
+    // adapter (see src/repositories/memory-html-object-store.ts) used
+    // for tests/local dev only — it is rejected outright in production
+    // by the refinement below, never silently substituted. `filesystem`
+    // requires an explicit absolute CACHE_OBJECT_STORE_ROOT; nothing
+    // defaults to the application's own repository directory.
+    CACHE_OBJECT_STORE_PROVIDER: z.enum(['filesystem', 'memory']).default('memory'),
+    CACHE_OBJECT_STORE_ROOT: z.string().optional(),
   })
   .transform((raw) => ({
     ...raw,
     AUTH_TRUSTED_ORIGINS: parseTrustedOrigins(raw.AUTH_TRUSTED_ORIGINS, raw.NODE_ENV === 'production'),
-  }));
+  }))
+  .superRefine((raw, ctx) => {
+    if (raw.NODE_ENV === 'production' && raw.CACHE_OBJECT_STORE_PROVIDER === 'memory') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'CACHE_OBJECT_STORE_PROVIDER=memory is forbidden in production; configure filesystem (or a future S3/R2 adapter)',
+        path: ['CACHE_OBJECT_STORE_PROVIDER'],
+      });
+    }
+    if (raw.CACHE_OBJECT_STORE_PROVIDER === 'filesystem') {
+      if (!raw.CACHE_OBJECT_STORE_ROOT) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'CACHE_OBJECT_STORE_ROOT is required when CACHE_OBJECT_STORE_PROVIDER=filesystem',
+          path: ['CACHE_OBJECT_STORE_ROOT'],
+        });
+      } else if (!raw.CACHE_OBJECT_STORE_ROOT.startsWith('/')) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'CACHE_OBJECT_STORE_ROOT must be an absolute path',
+          path: ['CACHE_OBJECT_STORE_ROOT'],
+        });
+      }
+    }
+  });
 
+// Fails closed at startup (Zod throws) rather than falling back to a
+// permissive default — matches the existing convention for every other
+// security-relevant env var in this file.
 export const env = envSchema.parse(process.env);

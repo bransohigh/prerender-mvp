@@ -373,11 +373,13 @@ Metrics, structured logging, `/livez` ve `/readyz` için bkz. [OBSERVABILITY.md]
 - Cookie güvenliği, CSRF, rate limiting, session tehdit modeli için bkz. [SECURITY.md](SECURITY.md).
 - Tenant audit history (`GET /v1/organizations/:organizationId/audit-events`, owner/admin only) ve platform-level `auth.login.*` security event ayrımı için bkz. [AUDIT_LOGGING.md](AUDIT_LOGGING.md).
 
-## Render Cache (Phase 8A-1 — identity ve metadata temeli)
+## Render Cache (Phase 8A-1 + 8A-2 — identity/metadata ve HTML object storage temeli)
 
 Cache identity/key formülü, URL normalizasyonu, render profile
 fingerprint, freshness/stale state modeli, PostgreSQL `cache_entries`
-şeması ve tenant izolasyonu, storage key formatı ve hassas URL politikası
-için bkz. [CACHE_ARCHITECTURE.md](CACHE_ARCHITECTURE.md). Bu checkpoint
-yalnızca metadata katmanını kurar — `/v1/render` henüz cache'e bakmıyor,
-hiçbir HTML/obje storage'a yazılmıyor.
+şeması, tenant izolasyonu, immutable/content-addressed storage key
+formatı, compression/size limitleri, filesystem+memory object store
+adapter'ları ve `cache-storage-service`'in commit/read lifecycle'ı için
+bkz. [CACHE_ARCHITECTURE.md](CACHE_ARCHITECTURE.md). Bu checkpoint'ler
+yalnızca metadata + object storage temelini kurar — `/v1/render` henüz
+cache'e bakmıyor, hiçbir HTML client'a dönmüyor.

@@ -175,6 +175,18 @@ optimistic-concurrency and atomic-upsert behavior, is in
 [CACHE_ARCHITECTURE.md](CACHE_ARCHITECTURE.md). Not yet wired to any
 route — this is a metadata foundation only.
 
+## Cache object storage tenant scoping (Phase 8A-2)
+
+`src/services/cache-storage-service.ts` takes a full `CacheIdentity`
+(never loose org/project/domain strings) for every operation, and every
+HTML object storage key embeds `organizationId`/`projectId`/`domainId` as
+validated path segments. Combined with the Phase 8A-1 database-level
+tenant isolation on `cache_entries`, this means tenant A's service calls
+can never resolve, read, or overwrite tenant B's stored HTML object — see
+[CACHE_ARCHITECTURE.md](CACHE_ARCHITECTURE.md) for the full detail and
+`test/db/cache-storage-service.test.ts` for the cross-tenant/cross-project
+isolation tests.
+
 ## Not yet implemented (tracked for a later checkpoint)
 
 - Ownership transfer.
