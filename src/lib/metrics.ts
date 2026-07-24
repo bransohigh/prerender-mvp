@@ -74,6 +74,13 @@ export type DatabaseOperationLabel =
   | 'ping';
 export type DatabaseOperationResultLabel = 'success' | 'failure';
 
+// Phase 8A-1. Fixed enums only — never a cache key, URL, hostname,
+// organization/project/domain id, or request id. /v1/render is not
+// cache-aware yet, so nothing increments these outside repository/service
+// tests until a later checkpoint wires it up.
+export type CacheOperationLabel = 'create_pending' | 'update_ready' | 'update_failed' | 'invalidate' | 'find_by_identity';
+export type CacheOperationResultLabel = 'success' | 'failure' | 'conflict';
+
 export interface Metrics {
   observeRenderDuration: (seconds: number) => void;
   observeQueueWait: (seconds: number) => void;
@@ -99,6 +106,8 @@ export interface Metrics {
   incrementAuditEvent: (action: string, result: AuditEventResultLabel) => void;
   incrementCsrfRejection: (reason: CsrfRejectionReason) => void;
   incrementAuthSecurityEvent: (event: AuthSecurityEventLabel) => void;
+  incrementCacheOperation: (operation: CacheOperationLabel, result: CacheOperationResultLabel) => void;
+  observeCacheRepositoryDuration: (operation: CacheOperationLabel, seconds: number) => void;
   getMetrics: () => Promise<string>;
   getContentType: () => string;
   reset: () => void;
@@ -287,6 +296,20 @@ export function createMetrics(options?: CreateMetricsOptions): Metrics {
     registers: [register],
   });
 
+  const cacheOperationsTotal = new Counter({
+    name: `${prefix}cache_operations_total`,
+    help: 'Total cache metadata repository operations, by fixed operation and result',
+    labelNames: ['operation', 'result'] as const,
+    registers: [register],
+  });
+
+  const cacheRepositoryDurationSeconds = new Histogram({
+    name: `${prefix}cache_repository_duration_seconds`,
+    help: 'Cache metadata repository operation duration in seconds, by fixed operation',
+    labelNames: ['operation'] as const,
+    registers: [register],
+  });
+
   return {
     observeRenderDuration(seconds) {
       safe(() => renderDurationSeconds.observe(seconds));
@@ -347,6 +370,12 @@ export function createMetrics(options?: CreateMetricsOptions): Metrics {
     incrementAuthSecurityEvent(event) {
       safe(() => authSecurityEventsTotal.labels(event).inc());
     },
+    incrementCacheOperation(operation, result) {
+      safe(() => cacheOperationsTotal.labels(operation, result).inc());
+    },
+    observeCacheRepositoryDuration(operation, seconds) {
+      safe(() => cacheRepositoryDurationSeconds.labels(operation).observe(seconds));
+    },
     async getMetrics() {
       try {
         return await register.metrics();
@@ -384,6 +413,8 @@ export function createNoopMetrics(): Metrics {
     incrementAuditEvent() {},
     incrementCsrfRejection() {},
     incrementAuthSecurityEvent() {},
+    incrementCacheOperation() {},
+    observeCacheRepositoryDuration() {},
     async getMetrics() {
       return '';
     },

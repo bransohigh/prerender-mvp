@@ -218,6 +218,16 @@ Kritik mutasyonlar (proje/domain/API key/invitation/membership) audit
 satırıyla aynı Postgres transaction'ında commit edilir — audit insert
 başarısız olursa mutasyon rollback olur.
 
+## Render cache metadata (Phase 8A-1)
+
+Cache identity/metadata katmanı eklendi — bkz. [CACHE_ARCHITECTURE.md](CACHE_ARCHITECTURE.md).
+Normalized URL yalnızca `cache_entries.normalized_url` kolonunda saklanır;
+hiçbir log satırında, metric label'ında, audit metadata'sında veya hata
+mesajında görünmez (sentinel testle doğrulanmıştır). Storage key'ler
+yalnızca server-generated ID'lerden ve doğrulanmış hex hash'lerden
+üretilir — path traversal yapısal olarak imkansızdır. Henüz `/v1/render`
+ile entegre değildir; hiçbir HTML/obje storage okuma-yazma işlemi yoktur.
+
 ## Sonraki Adımlar
 
 - Audit retention/arşivleme otomasyonu, SIEM export

@@ -164,6 +164,17 @@ Three distinct classes, never conflated:
    cookie-authenticated) and never browser-callable via CORS (see
    AUTHENTICATION.md).
 
+## Cache entry tenant isolation (Phase 8A-1)
+
+`cache_entries` rows are scoped by `organization_id`/`project_id`/
+`domain_id`, and cross-tenant combinations are rejected at the database
+level via composite foreign keys against new composite unique constraints
+on `projects (id, organization_id)` and `domains (id, project_id)` — not
+just an application-level check. Full detail, including the repository's
+optimistic-concurrency and atomic-upsert behavior, is in
+[CACHE_ARCHITECTURE.md](CACHE_ARCHITECTURE.md). Not yet wired to any
+route — this is a metadata foundation only.
+
 ## Not yet implemented (tracked for a later checkpoint)
 
 - Ownership transfer.

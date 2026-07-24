@@ -61,6 +61,8 @@ tarafından sık sık pollanır ve `/v1/render` çağıranlarla aynı bütçeyi 
 | `prerender_sitemap_fetch_duration_seconds` | Histogram | — | Sitemap fetch+parse süresi |
 | `prerender_sitemap_urls_discovered_total` | Counter | — | Tüm sitemap fetch'leri boyunca keşfedilen toplam URL sayısı |
 | `prerender_database_operations_total` | Counter | `operation`, `result` | Sabit, önceden tanımlı operation isimleri (`project_create`, `domain_create`, `sitemap_source_upsert`, `ping` vb.), `result`=`success`\|`failure` |
+| `prerender_cache_operations_total` | Counter | `operation`, `result` | Cache metadata repository işlemi (Phase 8A-1): `operation`=`create_pending`\|`update_ready`\|`update_failed`\|`invalidate`\|`find_by_identity`, `result`=`success`\|`failure`\|`conflict`. Henüz hiçbir route bu metriği artırmıyor — bkz. [CACHE_ARCHITECTURE.md](CACHE_ARCHITECTURE.md) |
+| `prerender_cache_repository_duration_seconds` | Histogram | `operation` | Cache metadata repository işlem süresi, aynı `operation` label seti |
 
 Domain, hostname, project ID, domain ID, sitemap URL veya verification
 token **hiçbir metric label'ında kullanılmaz** — `method`, `result`,

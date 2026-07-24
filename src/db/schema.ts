@@ -5,10 +5,14 @@ import {
   text,
   timestamp,
   integer,
+  bigint,
   boolean,
   jsonb,
   uniqueIndex,
   index,
+  unique,
+  check,
+  foreignKey,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
@@ -354,6 +358,13 @@ export const projects = pgTable('projects', {
 }, (table) => ({
   slugUnique: uniqueIndex('projects_slug_unique').on(table.slug),
   organizationIdIdx: index('projects_organization_id_idx').on(table.organizationId),
+  // Lets cache_entries declare a composite FK (project_id, organization_id)
+  // -> projects(id, organization_id) — Postgres requires a unique
+  // constraint on the referenced columns. This is what makes "a project
+  // from organization A combined with organization_id B" a database-level
+  // impossibility for any table that references it this way, not just an
+  // application-level check. See cache_entries below.
+  idOrganizationIdUnique: unique('projects_id_organization_id_unique').on(table.id, table.organizationId),
 }));
 
 export const domains = pgTable('domains', {
@@ -378,6 +389,11 @@ export const domains = pgTable('domains', {
     .on(table.normalizedHostname)
     .where(sql`status != 'suspended'`),
   projectIdIdx: index('domains_project_id_idx').on(table.projectId),
+  // Same purpose as projects.idOrganizationIdUnique above — lets
+  // cache_entries declare a composite FK (domain_id, project_id) ->
+  // domains(id, project_id), so a domain from project A can never be
+  // combined with project_id B in a cache_entries row.
+  idProjectIdUnique: unique('domains_id_project_id_unique').on(table.id, table.projectId),
 }));
 
 export const sitemapSources = pgTable('sitemap_sources', {
@@ -430,4 +446,145 @@ export const discoveredUrls = pgTable('discovered_urls', {
     table.normalizedUrl,
   ),
   domainIdIdx: index('discovered_urls_domain_id_idx').on(table.domainId),
+}));
+
+// ---------------------------------------------------------------------------
+// Render cache metadata (Phase 8A-1). Metadata only — no HTML is stored in
+// this table (see CACHE_ARCHITECTURE.md). storage_key is a placeholder for
+// a future object-storage checkpoint; nothing writes an object yet.
+// ---------------------------------------------------------------------------
+
+export const cacheEntryStatusEnum = pgEnum('cache_entry_status', [
+  'pending',
+  'ready',
+  'failed',
+  'invalidated',
+]);
+
+export const cacheEntries = pgTable('cache_entries', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: text('organization_id')
+    .notNull()
+    .references(() => organization.id, { onDelete: 'restrict' }),
+  projectId: uuid('project_id').notNull(),
+  domainId: uuid('domain_id').notNull(),
+  cacheKeyVersion: integer('cache_key_version').notNull(),
+  // Hex-encoded SHA-256 (64 lowercase hex chars) — see
+  // src/lib/cache-identity.ts. Never derived from or reversible to the raw
+  // URL; format is enforced below via a CHECK constraint.
+  cacheKeyHash: text('cache_key_hash').notNull(),
+  // The full normalized URL is stored here by documented design (needed
+  // to actually re-render on a cache miss) — but is NEVER logged, put in
+  // a metric label, or included in an error message. See
+  // CACHE_ARCHITECTURE.md's "Sensitive URL handling".
+  normalizedUrl: text('normalized_url').notNull(),
+  normalizedUrlHash: text('normalized_url_hash').notNull(),
+  renderProfileHash: text('render_profile_hash').notNull(),
+  status: cacheEntryStatusEnum('status').notNull().default('pending'),
+  // Relative object-storage key (src/lib/cache-storage-key.ts) — never a
+  // URL, hostname, or raw user input. No object is written to it yet.
+  storageKey: text('storage_key'),
+  contentHash: text('content_hash'),
+  contentEncoding: text('content_encoding'),
+  contentBytes: bigint('content_bytes', { mode: 'number' }),
+  responseStatus: integer('response_status'),
+  renderedAt: timestamp('rendered_at', { withTimezone: true }),
+  freshUntil: timestamp('fresh_until', { withTimezone: true }),
+  staleUntil: timestamp('stale_until', { withTimezone: true }),
+  lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
+  lastErrorCode: text('last_error_code'),
+  invalidatedAt: timestamp('invalidated_at', { withTimezone: true }),
+  generation: integer('generation').notNull().default(1),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  // Database-enforced cross-tenant consistency (not just an application
+  // check): these composite FKs make it impossible to insert a row where
+  // project_id belongs to a different organization than organization_id
+  // says, or where domain_id belongs to a different project than
+  // project_id says — see projects.idOrganizationIdUnique and
+  // domains.idProjectIdUnique, the composite unique constraints these
+  // reference.
+  projectOrganizationFk: foreignKey({
+    name: 'cache_entries_project_organization_fk',
+    columns: [table.projectId, table.organizationId],
+    foreignColumns: [projects.id, projects.organizationId],
+  }).onDelete('restrict'),
+  domainProjectFk: foreignKey({
+    name: 'cache_entries_domain_project_fk',
+    columns: [table.domainId, table.projectId],
+    foreignColumns: [domains.id, domains.projectId],
+  }).onDelete('cascade'),
+  // One cache identity per org/project/domain/cache-key-version/hash.
+  identityUnique: uniqueIndex('cache_entries_identity_unique').on(
+    table.organizationId,
+    table.projectId,
+    table.domainId,
+    table.cacheKeyVersion,
+    table.cacheKeyHash,
+  ),
+  // Exact-lookup path (the only query shape src/repositories/postgres/
+  // cache-repository.ts's findCacheEntryByIdentity uses).
+  lookupIdx: index('cache_entries_lookup_idx').on(
+    table.organizationId,
+    table.projectId,
+    table.domainId,
+    table.cacheKeyHash,
+  ),
+  projectIdIdx: index('cache_entries_project_id_idx').on(table.projectId),
+  domainIdIdx: index('cache_entries_domain_id_idx').on(table.domainId),
+  // Supports future freshness-maintenance/invalidation sweeps without a
+  // full table scan — not used by any query in this checkpoint.
+  statusFreshUntilIdx: index('cache_entries_status_fresh_until_idx').on(table.status, table.freshUntil),
+  generationCheck: check('cache_entries_generation_check', sql`${table.generation} >= 1`),
+  contentBytesCheck: check(
+    'cache_entries_content_bytes_check',
+    sql`${table.contentBytes} IS NULL OR ${table.contentBytes} >= 0`,
+  ),
+  responseStatusCheck: check(
+    'cache_entries_response_status_check',
+    sql`${table.responseStatus} IS NULL OR (${table.responseStatus} >= 100 AND ${table.responseStatus} < 600)`,
+  ),
+  staleAfterFreshCheck: check(
+    'cache_entries_stale_after_fresh_check',
+    sql`${table.staleUntil} IS NULL OR ${table.freshUntil} IS NULL OR ${table.staleUntil} >= ${table.freshUntil}`,
+  ),
+  readyRequiresContentCheck: check(
+    'cache_entries_ready_requires_content_check',
+    sql`${table.status} != 'ready' OR (
+      ${table.storageKey} IS NOT NULL AND
+      ${table.contentHash} IS NOT NULL AND
+      ${table.renderedAt} IS NOT NULL AND
+      ${table.freshUntil} IS NOT NULL AND
+      ${table.staleUntil} IS NOT NULL
+    )`,
+  ),
+  pendingNoContentCheck: check(
+    'cache_entries_pending_no_content_check',
+    sql`${table.status} != 'pending' OR (${table.storageKey} IS NULL AND ${table.contentHash} IS NULL)`,
+  ),
+  invalidatedRequiresTimestampCheck: check(
+    'cache_entries_invalidated_requires_timestamp_check',
+    sql`${table.status} != 'invalidated' OR ${table.invalidatedAt} IS NOT NULL`,
+  ),
+  cacheKeyHashFormatCheck: check(
+    'cache_entries_cache_key_hash_format_check',
+    sql`${table.cacheKeyHash} ~ '^[0-9a-f]{64}$'`,
+  ),
+  normalizedUrlHashFormatCheck: check(
+    'cache_entries_normalized_url_hash_format_check',
+    sql`${table.normalizedUrlHash} ~ '^[0-9a-f]{64}$'`,
+  ),
+  renderProfileHashFormatCheck: check(
+    'cache_entries_render_profile_hash_format_check',
+    sql`${table.renderProfileHash} ~ '^[0-9a-f]{64}$'`,
+  ),
+  contentHashFormatCheck: check(
+    'cache_entries_content_hash_format_check',
+    sql`${table.contentHash} IS NULL OR ${table.contentHash} ~ '^[0-9a-f]{64}$'`,
+  ),
+  storageKeyNoTraversalCheck: check(
+    'cache_entries_storage_key_no_traversal_check',
+    sql`${table.storageKey} IS NULL OR ${table.storageKey} NOT LIKE '%..%'`,
+  ),
 }));
